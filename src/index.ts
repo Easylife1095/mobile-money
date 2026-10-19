@@ -182,6 +182,10 @@ const SHUTDOWN_TIMEOUT_MS = parseInt(
   process.env.SHUTDOWN_TIMEOUT_MS || "10000",
   10,
 );
+const QUEUE_SHUTDOWN_TIMEOUT_MS = parseInt(
+  process.env.QUEUE_SHUTDOWN_TIMEOUT_MS || "30000",
+  10,
+);
 
 let server: Server | null = null;
 
@@ -189,6 +193,7 @@ export const shutdownHandler = createGracefulShutdownHandler({
   pool,
   disconnectRedis,
   timeoutMs: SHUTDOWN_TIMEOUT_MS,
+  onCleanupTimeoutMs: QUEUE_SHUTDOWN_TIMEOUT_MS,
   onCleanup: async () => {
     console.log("[Shutdown] Draining queue resources");
     const { shutdownQueue } = await import("./queue/index.js");
