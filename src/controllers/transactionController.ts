@@ -1,6 +1,11 @@
 import logger from "../utils/logger";
 import { NextFunction, Request, Response } from "express";
 import { z } from "zod";
+import {
+  encodeCursor,
+  decodeCursor,
+  buildPaginationMeta,
+} from "../utils/pagination.js";
 import { StellarService } from "../services/stellar/stellarService";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { maskPhoneNumber } from "../utils/masking";
@@ -180,46 +185,63 @@ export const getTransactionHistoryHandler = async (
     };
 
     // Database Queries
-    // If using cursor-based pagination, fetch limit+1 items to determine `hasMore`.
+    // Cursor-based pagination takes priority when `before` or `after` is present.
+    // Falls back to offset-based for legacy clients that omit cursor params.
     let transactions = [] as any[];
     let total: number | undefined;
 
     if (before || after) {
+      // Validate and decode the cursor so the model receives typed values.
+      let cursorOptions: { before?: string; after?: string } = {};
+      try {
+        if (after) {
+          decodeCursor(after as string); // validate — throws on malformed input
+          cursorOptions = { after: after as string };
+        } else if (before) {
+          decodeCursor(before as string);
+          cursorOptions = { before: before as string };
+        }
+      } catch (cursorErr: any) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "Invalid pagination cursor",
+          { error: cursorErr.message },
+        );
+      }
+
+      const direction: "forward" | "backward" = before ? "backward" : "forward";
+
+      // Fetch limit+1 rows so we can detect whether another page exists.
       const rows = await transactionModel.list(
         limitNum + 1,
-        offsetNum,
+        0, // offset is unused with cursor pagination
         startDate as string | undefined,
         endDate as string | undefined,
         filters,
-        {
-          before: before as string | undefined,
-          after: after as string | undefined,
-        },
+        cursorOptions,
       );
 
-      // If 'before' was used we fetched ascending results; reverse to keep newest-first
-      if (before) {
-        rows.reverse();
-      }
+      // buildPaginationMeta trims the sentinel row and reverses for backward pages.
+      const hasPrevPage = Boolean(after); // if we used `after`, a prev page exists
+      const paginationMeta = buildPaginationMeta(
+        rows,
+        limitNum,
+        direction,
+        hasPrevPage,
+      );
 
-      const hasMore = rows.length > limitNum;
       transactions = rows.slice(0, limitNum);
+      if (direction === "backward") transactions.reverse();
 
       return res.json({
         data: transactions,
         pagination: {
           limit: limitNum,
-          before: transactions.length
-            ? Buffer.from(
-                `${transactions[0].createdAt.toISOString()}|${transactions[0].id}`,
-              ).toString("base64")
-            : null,
-          after: transactions.length
-            ? Buffer.from(
-                `${transactions[transactions.length - 1].createdAt.toISOString()}|${transactions[transactions.length - 1].id}`,
-              ).toString("base64")
-            : null,
-          hasMore,
+          next_cursor: paginationMeta.next_cursor,
+          prev_cursor: paginationMeta.prev_cursor,
+          has_next: paginationMeta.has_next,
+          has_prev: paginationMeta.has_prev,
+          count: paginationMeta.count,
         },
       });
     }
