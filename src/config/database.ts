@@ -913,12 +913,49 @@ if (process.env.NODE_ENV !== "test") {
 export async function queryRead<T extends import("pg").QueryResultRow = any>(
   text: string,
   params?: unknown[],
+  signal?: AbortSignal,
 ): Promise<import("pg").QueryResult<T>> {
-  const replicaResult = await queryReplica([text, params]);
-  if (replicaResult) return replicaResult;
+  const query = async (): Promise<import("pg").QueryResult<T>> => {
+    const replicaResult = await queryReplica([text, params]);
+    if (replicaResult) return replicaResult;
 
-  // Fall back: use primary pool (which goes through PgBouncer)
-  return runQuery([text, params], false);
+    // Fall back: use primary pool (which goes through PgBouncer)
+    return runQuery([text, params], false);
+  };
+
+  return signal ? raceWithAbortSignal(query(), signal) : query();
+}
+
+/**
+ * Races `promise` against `signal` aborting. Does not cancel the underlying
+ * work server-side (the `pg` pool has no cheap way to do that mid-flight);
+ * this exists so a caller — most importantly `requestTimeout` middleware —
+ * stops waiting on the query the instant the request's deadline passes,
+ * rather than discovering the abort only after the query eventually
+ * resolves on its own.
+ */
+function raceWithAbortSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(new Error("Query aborted before it started"));
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error("Query aborted: request timed out"));
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    promise
+      .then((result) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      })
+      .catch((err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      });
+  });
 }
 
 /**
@@ -946,10 +983,12 @@ export async function queryTransactionLogRead<T extends import("pg").QueryResult
 export async function queryWrite<T extends import("pg").QueryResultRow = any>(
   text: string,
   params?: unknown[],
+  signal?: AbortSignal,
 ): Promise<import("pg").QueryResult<T>> {
   // Explicitly primary: bypasses GET-request replica routing, so callers can
   // use it for reads that must see the latest committed data.
-  return runQuery([text, params], false);
+  const query = () => runQuery([text, params], false);
+  return signal ? raceWithAbortSignal(query(), signal) : query();
 }
 
 export interface ReplicaPoolStatus {
