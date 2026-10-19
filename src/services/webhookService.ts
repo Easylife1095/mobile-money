@@ -3,6 +3,7 @@ import { Queue } from "bullmq";
 import { queueOptions } from "../queue/config";
 import logger from "../utils/logger";
 import { validateWebhookUrl, SsrfBlockedError } from "../security/ssrf";
+import { createWebhookSignature } from "../utils/webhookSigner";
 
 /** Queue used for notifications sent to SEP-31 receiving anchors. */
 export const RECEIVING_ANCHOR_WEBHOOK_QUEUE = "receiving-anchor-webhooks";
@@ -106,14 +107,14 @@ export class WebhookDispatcherService {
     }
 
     const body = JSON.stringify(job.payload);
-    const signature = `sha256=${createHmac("sha256", job.secret)
-      .update(body)
-      .digest("hex")}`;
+    const signatureHeaders = createWebhookSignature(body, job.secret);
     const response = await fetch(job.callbackUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Stellar-Signature": signature,
+        "X-Stellar-Signature": signatureHeaders["X-Signature"],
+        "X-Signature": signatureHeaders["X-Signature"],
+        "X-Signature-Timestamp": signatureHeaders["X-Signature-Timestamp"],
       },
       body,
     });
