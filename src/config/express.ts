@@ -144,7 +144,67 @@ export const corsOptions: CorsOptions = {
  * Adjust the `scriptSrc`, `styleSrc`, and `connectSrc` arrays to match your
  * actual asset origins (CDN, analytics, etc.) rather than using wildcards.
  */
-function buildCspDirectives(): Record<string, Iterable<string>> {
+function parseFrameOrigins(): string[] {
+  const origins = new Set<string>();
+
+  for (const value of (process.env.CSP_FRAME_SRC ?? "").split(",")) {
+    const entry = value.trim();
+    if (!entry) continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(entry);
+    } catch {
+      throw new Error(`[express.ts] Invalid CSP frame origin: "${entry}".`);
+    }
+
+    if (
+      ![
+        "https:",
+        ...(process.env.NODE_ENV === "production" ? [] : ["http:"]),
+      ].includes(parsed.protocol) ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== "/" ||
+      parsed.search ||
+      parsed.hash ||
+      entry.includes("*")
+    ) {
+      throw new Error(
+        `[express.ts] CSP frame sources must be exact origins: "${entry}".`,
+      );
+    }
+
+    origins.add(parsed.origin);
+  }
+
+  for (const value of [
+    process.env.STELLAR_WEB_AUTH_DOMAIN || "https://api.mobilemoney.com",
+    process.env.SEP24_INTERACTIVE_URL || "https://wallet.mobilemoney.com",
+  ]) {
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      throw new Error(`[express.ts] Invalid configured frame URL: "${value}".`);
+    }
+
+    if (
+      ![
+        "https:",
+        ...(process.env.NODE_ENV === "production" ? [] : ["http:"]),
+      ].includes(parsed.protocol) ||
+      parsed.username ||
+      parsed.password
+    ) {
+      throw new Error(`[express.ts] Invalid configured frame URL: "${value}".`);
+    }
+    origins.add(parsed.origin);
+  }
+
+  return Array.from(origins);
+}
+
+export function buildCspDirectives(): Record<string, Iterable<string>> {
   const reportUri = process.env.CSP_REPORT_URI;
 
   // Origins from the allowlist are safe to include in connect-src so that
@@ -171,8 +231,8 @@ function buildCspDirectives(): Record<string, Iterable<string>> {
     // fetch(), XHR, WebSocket: same-origin + explicitly listed API origins.
     connectSrc: ["'self'", ...allowedOriginList],
 
-    // Iframes: deny.
-    frameSrc: ["'none'"],
+    // Permit only configured exact origins for SEP-24/WebAuth iframes.
+    frameSrc: ["'self'", ...parseFrameOrigins()],
 
     // Web Workers / nested browsing contexts: deny.
     workerSrc: ["'none'"],

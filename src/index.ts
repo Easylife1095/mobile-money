@@ -133,6 +133,14 @@ import {
 } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
 import { StellarService } from "./services/stellar/stellarService";
+import {
+  startStellarCollector,
+  stopStellarCollector,
+} from "./monitoring/stellarCollector";
+import {
+  startSyntheticProbeWorker,
+  stopSyntheticProbeWorker,
+} from "./workers/syntheticProbeWorker";
 
 // Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
@@ -193,6 +201,8 @@ export const shutdownHandler = createGracefulShutdownHandler({
 
     const { currencyService } = await import("./services/currency.js");
     currencyService.shutdown();
+    stopStellarCollector();
+    stopSyntheticProbeWorker();
   },
 });
 
@@ -580,6 +590,8 @@ async function initializeRuntime(): Promise<void> {
 
   // Initialize Prometheus Horizon Scraper
   startStellarExporter();
+  startStellarCollector();
+  startSyntheticProbeWorker();
 
   // Verify Horizon reachability before starting runtime workers
   try {
