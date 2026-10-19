@@ -13,6 +13,19 @@ export interface ClientConfig {
   transport?: "fetch" | "axios";
   /** Optional custom headers */
   headers?: Record<string, string>;
+  /** Automatic retry behavior for idempotent requests (default: enabled, 3 retries) */
+  retry?: RetryOptions;
+}
+
+export interface RetryOptions {
+  /** Set to false to disable automatic retries entirely (default: true) */
+  enabled?: boolean;
+  /** Maximum number of retry attempts after the initial request (default: 3) */
+  maxRetries?: number;
+  /** Base delay in milliseconds for exponential backoff (default: 200) */
+  baseDelayMs?: number;
+  /** Maximum delay cap in milliseconds between retries (default: 5000) */
+  maxDelayMs?: number;
 }
 
 export interface AuthParams {
