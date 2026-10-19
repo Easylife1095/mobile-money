@@ -38,6 +38,8 @@ import { amlScreeningService } from "../services/amlScreening";
 
 import { queueOptions, getWorkerConcurrency } from "./config";
 import { providerQueueControl } from "./providerQueueControl";
+import { WorkerAutoscaler, isAutoscalerEnabled } from "./workerAutoscaler";
+import { transactionQueue } from "./transactionQueue";
 
 const transactionModel = new TransactionModel();
 const mobileMoneyService = new MobileMoneyService();
@@ -792,7 +794,20 @@ export const transactionWorker:
       { ...queueOptions, concurrency: CONCURRENCY },
     );
 
+// Scale worker concurrency with queue depth (BullMQ worker only; the NATS
+// consumer manages its own concurrency).
+let workerAutoscaler: WorkerAutoscaler | null = null;
+if (
+  transactionWorker instanceof Worker &&
+  isAutoscalerEnabled() &&
+  process.env.NODE_ENV !== "test"
+) {
+  workerAutoscaler = new WorkerAutoscaler(transactionQueue, transactionWorker);
+  workerAutoscaler.start();
+}
+
 export async function closeWorker(): Promise<void> {
+  workerAutoscaler?.stop();
   await transactionWorker.close();
   if (NATS_QUEUE_ENABLED) {
     await natsManager.close();
