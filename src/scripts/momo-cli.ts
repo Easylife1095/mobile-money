@@ -10,8 +10,6 @@
 
 import dotenv from "dotenv";
 import os from "os";
-import { TransactionStatus } from "../models/transaction";
-import { getQueueStatsAggregate } from "../queue/queueDepthMetrics";
 import {
   CLI_ERROR_CODES,
   formatCliHeading,
@@ -89,6 +87,7 @@ Usage:
 Commands:
   setup                    Interactive setup for database and Stellar credentials.
   retry-batch <batch_id>   Retry all failed or stuck transactions for a specific batch ID (UUID).
+  verify-report <report> <signature> [public-key-file]  Verify a signed settlement report.
   dashboard                Render an active terminal overview of node CPU, memory, and queue lengths.
 
 Options:
@@ -106,7 +105,56 @@ export async function runCli(args: string[]): Promise<void> {
     return;
   }
 
+  if (command === "verify-report") {
+    const reportPath = args[1];
+    const signaturePath = args[2];
+    const publicKeyPath = args[3];
+    if (!reportPath || !signaturePath) {
+      printError(
+        "Usage: momo-cli verify-report <report> <signature> [public-key-file]",
+        undefined,
+        CLI_ERROR_CODES.MissingArgument,
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    try {
+      const { readFile } = await import("node:fs/promises");
+      const publicKey = publicKeyPath
+        ? await readFile(publicKeyPath, "utf8")
+        : process.env.ANCHOR_REPORT_PUBLIC_KEY;
+      if (!publicKey) {
+        throw new Error(
+          "Set ANCHOR_REPORT_PUBLIC_KEY or provide a public-key file",
+        );
+      }
+
+      const [report, signature] = await Promise.all([
+        readFile(reportPath),
+        readFile(signaturePath, "utf8"),
+      ]);
+      const { verifyReport, sha256Report } =
+        await import("../security/reportSigner.js");
+      if (!verifyReport(report, signature, publicKey)) {
+        printError("Report signature verification failed.");
+        process.exitCode = 1;
+        return;
+      }
+      printSuccess(
+        `Report signature verified. SHA-256: ${sha256Report(report)}`,
+      );
+      process.exitCode = 0;
+    } catch (error) {
+      printError("Unable to verify report", error);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   if (command === "dashboard") {
+    const { getQueueStatsAggregate } =
+      await import("../queue/queueDepthMetrics.js");
     console.clear();
     console.log("Starting Interactive CLI System Status Dashboard...");
     console.log("Press Ctrl+C to exit.\n");
@@ -194,14 +242,11 @@ export async function runCli(args: string[]): Promise<void> {
       return;
     }
 
-    const [{ pool }, queueModule, transactionQueueModule] = await Promise.all([
-      import("../config/database.js"),
-      import("../queue/index.js"),
-      import("../queue/transactionQueue.js"),
-    ]);
+    const { pool } = require("../config/database.js");
+    const queueModule = require("../queue/index.js");
     const { addTransactionJob } = queueModule;
     activePool = pool;
-    activeTransactionQueue = transactionQueueModule.transactionQueue;
+    activeTransactionQueue = queueModule.transactionQueue ?? null;
 
     console.log(`Searching for transactions in batch ${batchId}...`);
 
@@ -227,16 +272,12 @@ export async function runCli(args: string[]): Promise<void> {
 
       const total = transactions.length;
       const completed = transactions.filter(
-        (t) => t.status === TransactionStatus.Completed,
+        (t) => t.status === "completed",
       ).length;
-      const failed = transactions.filter(
-        (t) => t.status === TransactionStatus.Failed,
-      ).length;
-      const pending = transactions.filter(
-        (t) => t.status === TransactionStatus.Pending,
-      ).length;
+      const failed = transactions.filter((t) => t.status === "failed").length;
+      const pending = transactions.filter((t) => t.status === "pending").length;
       const cancelled = transactions.filter(
-        (t) => t.status === TransactionStatus.Cancelled,
+        (t) => t.status === "cancelled",
       ).length;
 
       console.log(`\nBatch Summary:`);
@@ -247,9 +288,7 @@ export async function runCli(args: string[]): Promise<void> {
       console.log(`  Cancelled: ${cancelled}`);
 
       const retriable = transactions.filter(
-        (t) =>
-          t.status === TransactionStatus.Failed ||
-          t.status === TransactionStatus.Pending,
+        (t) => t.status === "failed" || t.status === "pending",
       );
 
       if (retriable.length === 0) {
@@ -266,7 +305,7 @@ export async function runCli(args: string[]): Promise<void> {
 
         await pool.query(
           "UPDATE transactions SET status = $1, retry_count = retry_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
-          [TransactionStatus.Pending, tx.id],
+          ["pending", tx.id],
         );
 
         await addTransactionJob({
