@@ -4,6 +4,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { WebhookService, WebhookEvent } from "../services/webhook";
 import { ingestRateLimiter } from "../middleware/ingestRateLimit";
+import { optionalIdempotency } from "../middleware/idempotency";
 import { AirtelSignatureValidator } from "../utils/airtelSignatureValidator";
 import {
   verifyWebhookPayloadEd25519,
@@ -308,6 +309,7 @@ export async function verifyAirtelWebhookSignature(
 router.post(
   "/airtel",
   verifyAirtelWebhookSignature,
+  optionalIdempotency,
   async (req: Request, res: Response) => {
     try {
       const payload = req.body as FlatWebhookPayload;
@@ -357,6 +359,7 @@ router.post(
 router.post(
   "/orange",
   verifyOrangeWebhookSignature,
+  optionalIdempotency,
   async (req: Request, res: Response) => {
     try {
       const payload = req.body as FlatWebhookPayload;
