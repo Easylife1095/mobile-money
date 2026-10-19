@@ -278,6 +278,26 @@ export const kycRequestsTotal = new Counter({
   registers: [register],
 });
 
+// ---------------------------------------------------------------------------
+// Provider HTTP response tracking (issue #2357)
+// ---------------------------------------------------------------------------
+// Labelled counter used by the ProviderHighErrorRate Prometheus alert rule in
+// monitoring/alerts.yml.  Increment this in any service layer that makes
+// outbound HTTP calls to an external mobile money provider.
+//
+// Usage:
+//   import { providerHttpRequestsTotal } from "../utils/metrics";
+//   providerHttpRequestsTotal.inc({ provider: "mpesa", status_code: "200" });
+//
+// The alert expression is:
+//   rate(provider_http_requests_total{status_code=~"5.."}[5m])
+//   / rate(provider_http_requests_total[5m]) > 0.05
+export const providerHttpRequestsTotal = new Counter({
+  name: "provider_http_requests_total",
+  help: "Total number of outbound HTTP requests made to external mobile money providers, labelled by provider name and HTTP status code",
+  labelNames: ["provider", "status_code"],
+  registers: [register],
+});
 // Database Connection Pool Health Metrics
 export const dbPoolActiveConnections = new Gauge({
   name: "db_pool_active_connections",

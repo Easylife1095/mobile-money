@@ -31,6 +31,7 @@ import {
   transactionRoutesV1,
   vaultRoutesV1,
 } from "./routes/v1";
+import { quotesRouter } from "./routes/quotes";
 import { transactionRoutes } from "./routes/transactions";
 import { initializeEscrowEventProcessing } from "./services/stellar/stellarService";
 import { authRoutes } from "./routes/auth";
@@ -79,6 +80,11 @@ import {
   publicApiRateLimiter,
   sepRateLimiter,
 } from "./middleware/rateLimitRedis";
+import {
+  merchantRateLimiter,
+  publicRateLimiter,
+} from "./middleware/rateLimiter";
+import merchantWebhookRouter from "./routes/merchantWebhooks";
 import { i18nMiddleware } from "./utils/i18n";
 import { metricsMiddleware } from "./middleware/metrics";
 import { tracingMetricsMiddleware } from "./middleware/tracingMetrics";
@@ -439,6 +445,7 @@ app.use("/api/v1/disputes", disputeRoutesV1);
 app.use("/api/v1/stats", statsRoutesV1);
 app.use("/api/v1/vaults", vaultRoutesV1);
 app.use("/api/v1/compliance/travel-rule", travelRuleRoutes);
+app.use("/api/v1/quotes", quotesRouter);
 
 app.use(
   "/api/transactions",
@@ -498,7 +505,7 @@ app.get("/", interactiveSecurityMiddleware, (_req: Request, res: Response) => {
 });
 app.use("/", paymentLinkRoutes);
 
-// GDPR
+app.use("/api/merchant/webhooks", merchantRateLimiter, merchantWebhookRouter);
 app.use("/api/gdpr", privacyRoutes);
 app.use("/api/developer", developerDashboardRoutes);
 app.use("/api/admin", requireAuth, adminRoutes);
