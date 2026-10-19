@@ -76,10 +76,15 @@ import {
   dbConnectionLeakDetector,
   PoolStarvationMonitor,
 } from "./middleware/dbConnectionLeakDetector";
+import {
   publicApiRateLimiter,
   sepRateLimiter,
 } from "./middleware/rateLimitRedis";
-import { dbConnectionLeakDetector } from "./middleware/dbConnectionLeakDetector";
+import {
+  merchantRateLimiter,
+  publicRateLimiter,
+} from "./middleware/rateLimiter";
+import merchantWebhookRouter from "./routes/merchantWebhooks";
 import { i18nMiddleware } from "./utils/i18n";
 import { metricsMiddleware } from "./middleware/metrics";
 import { tracingMetricsMiddleware } from "./middleware/tracingMetrics";
@@ -490,7 +495,7 @@ app.get("/", interactiveSecurityMiddleware, (_req: Request, res: Response) => {
 });
 app.use("/", paymentLinkRoutes);
 
-// GDPR
+app.use("/api/merchant/webhooks", merchantRateLimiter, merchantWebhookRouter);
 app.use("/api/gdpr", privacyRoutes);
 app.use("/api/developer", developerDashboardRoutes);
 app.use("/api/admin", requireAuth, adminRoutes);
