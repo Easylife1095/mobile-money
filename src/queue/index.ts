@@ -153,3 +153,16 @@ export {
   childLoggerWithTrace,
   TRACE_ID_KEY,
 } from "./trace";
+
+// Customer KYC Callback Queue Exports
+export {
+  CUSTOMER_CALLBACK_QUEUE_NAME,
+  customerCallbackQueue,
+  enqueueCustomerCallback,
+  deliverCustomerCallback,
+  customerCallbackWorker,
+  startCustomerCallbackWorker,
+  closeCustomerCallbackWorker,
+  closeCustomerCallbackQueue,
+} from "./customerCallbackQueue";
+export type { CustomerCallbackJobData } from "./customerCallbackQueue";

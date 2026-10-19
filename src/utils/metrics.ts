@@ -329,3 +329,27 @@ export const momoProviderFloatBalance = new Gauge({
   registers: [register],
 });
 
+// Remittance Funnel Observability Metrics (Issue #2355)
+export const remittanceFunnelStageTotal = new Counter({
+  name: "remittance_funnel_stage_total",
+  help: "Total transactions entering or completing a remittance funnel stage",
+  labelNames: ["stage", "status", "provider", "currency"],
+  registers: [register],
+});
+
+export const remittanceFunnelDurationSeconds = new Histogram({
+  name: "remittance_funnel_duration_seconds",
+  help: "Latency of remittance funnel stages in seconds",
+  labelNames: ["stage", "provider"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300],
+  registers: [register],
+});
+
+export const remittanceDropOffTotal = new Counter({
+  name: "remittance_drop_off_total",
+  help: "Total dropped transactions per remittance funnel stage",
+  labelNames: ["stage", "reason", "provider"],
+  registers: [register],
+});
+
+
