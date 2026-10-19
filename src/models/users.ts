@@ -16,6 +16,7 @@ export interface User {
   mcc?: string | null;
   two_factor_secret?: string | null;
   backup_codes?: string[] | null;
+  backupPhoneNumber?: string | null;
   status: "active" | "frozen" | "suspended";
   tokenVersion?: number;
   createdAt: Date;
@@ -48,6 +49,7 @@ export interface UsersTableRow {
   display_name?: string | null;
   two_factor_secret?: string | null;
   backup_codes?: string[] | null;
+  backup_phone_number?: string | null;
   status: string;
   token_version?: number | null;
   created_at: Date | string;
@@ -90,6 +92,10 @@ function mapUserRow(row: UsersTableRow): User {
           decrypt(row.two_factor_secret)) as string)
       : null,
     backup_codes: row.backup_codes ?? null,
+    backupPhoneNumber: row.backup_phone_number
+      ? ((decryptField(row.backup_phone_number) ||
+          decrypt(row.backup_phone_number)) as string)
+      : null,
     status: row.status as User["status"],
     tokenVersion: row.token_version ?? 0,
     createdAt: new Date(row.created_at),
@@ -139,6 +145,10 @@ export class UserModel {
       displayName: row.display_name ?? null,
       two_factor_secret: decrypt(row.two_factor_secret) ?? null,
       backup_codes: row.backup_codes ?? null,
+      backupPhoneNumber: row.backup_phone_number
+        ? ((decryptField(row.backup_phone_number) ||
+            decrypt(row.backup_phone_number)) as string)
+        : null,
       status: row.status as User["status"],
       tokenVersion: row.token_version ?? 0,
       createdAt: new Date(row.created_at),
@@ -384,6 +394,19 @@ export class UserModel {
     await queryWrite(
       "UPDATE users SET mandatory_2fa_withdrawals = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
       [enabled, id],
+    );
+  }
+
+  async updateBackupPhoneNumber(
+    id: string,
+    backupPhoneNumber: string | null,
+  ): Promise<void> {
+    const encryptedPhone = backupPhoneNumber
+      ? encryptField(backupPhoneNumber) || encrypt(backupPhoneNumber)
+      : null;
+    await queryWrite(
+      "UPDATE users SET backup_phone_number = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+      [encryptedPhone, id],
     );
   }
 }

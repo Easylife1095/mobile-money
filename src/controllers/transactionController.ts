@@ -19,6 +19,7 @@ import {
 } from "../config/providers";
 import type { TransactionJobData } from "../queue/transactionQueue";
 import { amlService } from "../services/aml";
+import { amlVelocityService } from "../services/amlVelocityService";
 import {
   generateFlaggedTransactionComplianceReport,
   generateHighValueTransactionComplianceReport,
@@ -40,6 +41,8 @@ import { ERROR_CODES } from "../constants/errorCodes";
 import { travelRuleService } from "../compliance/travelRule";
 import { createError } from "../middleware/errorHandler";
 import { sep08Service } from "../services/compliance/sep08";
+import { validateMemo } from "../utils/stellarValidators";
+import { validateWebhookUrl } from "../security/ssrf";
 
 const IDEMPOTENCY_TTL_HOURS = Number(
   process.env.IDEMPOTENCY_KEY_TTL_HOURS || 24,
@@ -90,6 +93,9 @@ export const transactionSchema = z.object({
     .string()
     .max(256, { message: "Note cannot exceed 256 characters" })
     .optional(),
+  memoType: z.enum(["text", "id", "hash", "none"]).optional(),
+  memoValue: z.union([z.string(), z.number()]).optional(),
+  requireMemo: z.boolean().optional(),
   // Optional 2FA fields for withdrawals
   twoFactorToken: z.string().optional(),
   totpCode: z.string().optional(),
@@ -102,9 +108,36 @@ export const validateTransaction = (
   next: NextFunction,
 ) => {
   try {
-    transactionSchema.parse(req.body);
+    const parsedBody = transactionSchema.parse(req.body);
+
+    const memoRes = validateMemo(parsedBody.memoType, parsedBody.memoValue);
+    if (!memoRes.valid) {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        memoRes.error || "Invalid memo structure",
+        { error: memoRes.error },
+      );
+    }
+
+    if (parsedBody.requireMemo) {
+      if (
+        !parsedBody.memoType ||
+        parsedBody.memoType === "none" ||
+        parsedBody.memoValue === undefined ||
+        parsedBody.memoValue === null ||
+        parsedBody.memoValue === ""
+      ) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "Payments without memos are rejected because destination account requires memo mapping",
+          { error: "Missing required memo" },
+        );
+      }
+    }
+
     next();
   } catch (err: any) {
+    if (err && (err as any).code) throw err;
     const message =
       err.errors?.map((e: any) => e.message).join(", ") || "Invalid input";
     throw createError(ERROR_CODES.MISSING_FIELD, message, { error: message });
@@ -366,6 +399,41 @@ async function applyPreDispatchAMLProfile(
       `Pre-dispatch AML profiling failed for transaction ${transaction.id}:`,
       error,
     );
+  }
+}
+
+/**
+ * Rolling-window velocity check (1h / 24h / 30d). A breach flags the
+ * transaction for compliance review and holds it in PENDING_REVIEW.
+ * Returns true when the transaction was held and must not be dispatched.
+ * Fails open on infrastructure errors, like the other AML pre-dispatch checks.
+ */
+async function applyAMLVelocityHold(transaction: Transaction): Promise<boolean> {
+  if (!transaction.userId) return false;
+
+  const amount = Number(transaction.amount);
+  if (!Number.isFinite(amount) || amount < 0) return false;
+
+  try {
+    const result = await amlVelocityService.enforce({
+      id: transaction.id,
+      userId: transaction.userId,
+      type: transaction.type as import("../services/aml").AMLTransactionType,
+      amount,
+      createdAt:
+        transaction.createdAt instanceof Date
+          ? transaction.createdAt
+          : new Date(transaction.createdAt),
+      status: transaction.status,
+      currency: transaction.currency,
+    });
+    return result.held;
+  } catch (error) {
+    logger.error(
+      `AML velocity check failed for transaction ${transaction.id}:`,
+      error,
+    );
+    return false;
   }
 }
 
@@ -785,6 +853,13 @@ async function processTransactionRequest(
             void applyTravelRule(transaction);
             await applySEP08Verification(transaction);
 
+            if (await applyAMLVelocityHold(transaction)) {
+              return {
+                ...buildTransactionResponse(transaction),
+                status: TransactionStatus.PendingReview,
+              };
+            }
+
             const job = await addTransactionJob(
               {
                 transactionId: transaction.id,
@@ -869,7 +944,11 @@ export const withdrawHandler = async (req: Request, res: Response) => {
 export const getTransactionHandler = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const transaction = await transactionModel.findById(id);
+    let transaction = await transactionModel.findById(id);
+
+    if (!transaction && typeof id === "string" && id.trim()) {
+      transaction = await transactionModel.findByReferenceNumber(id.trim());
+    }
 
     if (!transaction) {
       throw createError(ERROR_CODES.NOT_FOUND, null, {
@@ -879,7 +958,7 @@ export const getTransactionHandler = async (req: Request, res: Response) => {
 
     let jobProgress = null;
     if (transaction.status === TransactionStatus.Pending) {
-      jobProgress = await getJobProgress(id);
+      jobProgress = await getJobProgress(transaction.id);
     }
 
     if (transaction.status === TransactionStatus.Pending) {
@@ -956,6 +1035,7 @@ export const cancelTransactionHandler = async (req: Request, res: Response) => {
 
     if (process.env.WEBHOOK_URL) {
       try {
+        await validateWebhookUrl(process.env.WEBHOOK_URL);
         await fetch(process.env.WEBHOOK_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },

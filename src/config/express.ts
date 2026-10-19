@@ -20,6 +20,7 @@ import cors, { type CorsOptions } from "cors";
 import helmet, { type HelmetOptions } from "helmet";
 import type { Application, Request, Response, NextFunction } from "express";
 import { maintenanceModeMiddleware } from "../middleware/maintenanceMode";
+import { SEP24_INTERACTIVE_CSP_HASHES } from "../services/sep24InteractivePage";
 
 /**
  * Parse the ALLOWED_ORIGINS environment variable into a frozen Set of exact
@@ -261,6 +262,60 @@ export const helmetOptions: HelmetOptions = {
 
   dnsPrefetchControl: { allow: false },
 };
+
+/**
+ * Wallet origins allowed to embed SEP-24 interactive views in an iframe,
+ * from the comma-separated SEP24_FRAME_ANCESTORS env var
+ * (e.g. "https://wallet.example.com,https://app.lobstr.co").
+ */
+function getInteractiveFrameAncestors(): string[] {
+  const origins = (process.env.SEP24_FRAME_ANCESTORS ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter((origin) => /^https:\/\/[^\s'";,]+$/.test(origin));
+  return ["'self'", ...origins];
+}
+
+/**
+ * Strict policy for the server-rendered SEP-24 interactive deposit/withdraw
+ * views. Extends the global {@link helmetOptions} (HSTS, CORP, etc.) and
+ * only relaxes what the views need: their own inline script/style blocks
+ * (allowed by hash, never 'unsafe-inline') and framing by approved wallets.
+ */
+export function buildInteractiveHelmetOptions(): HelmetOptions {
+  return {
+    ...helmetOptions,
+    contentSecurityPolicy: {
+      useDefaults: false,
+      directives: {
+        defaultSrc: ["'none'"],
+        scriptSrc: ["'self'", ...SEP24_INTERACTIVE_CSP_HASHES.script],
+        scriptSrcAttr: ["'none'"],
+        styleSrc: ["'self'", ...SEP24_INTERACTIVE_CSP_HASHES.style],
+        styleSrcAttr: ["'none'"],
+        imgSrc: ["'self'", "data:"],
+        fontSrc: ["'self'"],
+        connectSrc: ["'self'"],
+        frameSrc: ["'none'"],
+        frameAncestors: getInteractiveFrameAncestors(),
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    },
+    // Legacy fallback for browsers without CSP frame-ancestors support.
+    xFrameOptions: { action: "sameorigin" },
+    xContentTypeOptions: true,
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+    // Wallets open SEP-24 views as popups and rely on window.opener /
+    // postMessage, which COOP: same-origin would sever.
+    crossOriginOpenerPolicy: { policy: "unsafe-none" },
+  };
+}
+
+export const interactiveSecurityMiddleware = helmet(
+  buildInteractiveHelmetOptions(),
+);
 
 /**
  * Standalone middleware that writes the Permissions-Policy response header.

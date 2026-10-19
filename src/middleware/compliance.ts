@@ -4,6 +4,7 @@ import { geolocateMiddleware } from "./geolocate";
 import { kycCheck } from "./kycCheck";
 import { detectFraud } from "./fraudDetection";
 import { validateNetworkMiddleware } from "./validateNetworkMiddleware";
+import { complianceRulesMiddleware } from "./complianceRules";
 
 /**
  * Modularized compliance checking middleware chain.
@@ -15,6 +16,7 @@ import { validateNetworkMiddleware } from "./validateNetworkMiddleware";
  * but validateNetworkMiddleware is included here as part of compliance.
  */
 export const complianceMiddlewares = [
+  complianceRulesMiddleware,
   checkAccountStatusStrict,
   geoFencingMiddleware,
   validateNetworkMiddleware,

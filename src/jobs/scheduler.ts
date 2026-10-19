@@ -10,6 +10,7 @@ import { runBalanceMonitorJob } from "./balanceMonitorJob";
 import { runSep31MonitorJob } from "./sep31MonitorJob";
 import { runFeeBumpJob } from "./feeBumpJob";
 import { runSep31FeeBumpJob } from "./sep31FeeBumpJob";
+import { runSponsorWalletMonitorJob } from "../services/stellar/feeBump";
 import { MonitoringService } from "../services/monitoringService";
 import { createPagerDutyService } from "../services/pagerDutyService";
 import { runProviderBalanceAlertJob } from "./balances";
@@ -32,11 +33,19 @@ import { startNotificationWorker } from "../workers/notificationWorker";
 import { runTravelRuleExportJob } from "../services/compliance/travelRuleExport";
 import { runDlqCleanupJob } from "../queue/dlq";
 import { runHighValueComplianceReportJob } from "./highValueComplianceReportJob";
+import { runStellarReconciliationJob } from "../workers/stellarReconciliation";
+import { runAirtelReconciliationWorker } from "../workers/airtelReconciliation";
+import { runQuoteExpirationJob } from "./quoteExpirationJob";
+import { runDailySarSummaryJob } from "./dailySarSummaryJob";
+import { runPartitionManagerJob } from "./partitionManager";
+import { withJobTrace } from "../queue/jobTracing";
 
 interface JobConfig {
   name: string;
   schedule: string;
   handler: () => Promise<void>;
+  /** IANA timezone for the cron expression (defaults to the server timezone). */
+  timezone?: string;
 }
 
 const JOBS: JobConfig[] = [
@@ -95,6 +104,12 @@ const JOBS: JobConfig[] = [
     handler: runSep31FeeBumpJob,
   },
   {
+    name: "sponsor-wallet-monitor",
+    // Hourly - monitors dedicated Stellar fee-bump sponsor wallet balance
+    schedule: process.env.SPONSOR_WALLET_MONITOR_CRON || "0 * * * *",
+    handler: runSponsorWalletMonitorJob,
+  },
+  {
     name: "provider-balance-alert",
     // Every 10 minutes - checks MTN/Airtel operational balances and alerts treasury when low
     schedule: process.env.PROVIDER_BALANCE_ALERT_CRON || "*/10 * * * *",
@@ -105,6 +120,15 @@ const JOBS: JobConfig[] = [
     // Every 5 minutes - polls provider APIs for uptime and alerts on outages
     schedule: process.env.PROVIDER_HEALTH_CHECK_CRON || "*/5 * * * *",
     handler: runProviderHealthCheckJob,
+  },
+  {
+    name: "airtel-balance-monitor",
+    // Every 15 minutes - checks Airtel operational balance and alerts
+    schedule: process.env.AIRTEL_BALANCE_MONITOR_CRON || "*/15 * * * *",
+    handler: async () => {
+      const { checkAirtelBalanceAndAlert } = await import("./balanceMonitorJob.js");
+      return checkAirtelBalanceAndAlert();
+    },
   },
   {
     name: "daily-settlement",
@@ -166,6 +190,12 @@ const JOBS: JobConfig[] = [
     handler: runLedgerReconciliationJob,
   },
   {
+    name: "stellar-anchor-reconciliation",
+    // Every 10 minutes - reconciles on-chain payment hashes against internal DB records
+    schedule: process.env.STELLAR_RECONCILIATION_CRON || "*/10 * * * *",
+    handler: runStellarReconciliationJob,
+  },
+  {
     name: "database-backup",
     // Daily at 2:00 AM
     schedule: process.env.DATABASE_BACKUP_CRON || "0 2 * * *",
@@ -209,17 +239,58 @@ const JOBS: JobConfig[] = [
     handler: runHighValueComplianceReportJob,
   },
   {
+    name: "daily-sar-summary",
+    // Daily at midnight UTC - encrypts the previous day's flagged-activity
+    // summary into the compliance archive and notifies the compliance team
+    schedule: process.env.DAILY_SAR_SUMMARY_CRON || "0 0 * * *",
+    timezone: "UTC",
+    handler: runDailySarSummaryJob,
+  },
+  {
+    name: "audit-log-partition-manager",
+    // Daily at 00:15 UTC - pre-creates the next months' audit_logs partitions
+    schedule: process.env.AUDIT_LOG_PARTITION_CRON || "15 0 * * *",
+    timezone: "UTC",
+    handler: runPartitionManagerJob,
+  },
+  {
     name: "dlq-cleanup",
     // Daily at 3:30 AM — removes DLQ entries older than 90 days after overnight audit window
     schedule: process.env.DLQ_CLEANUP_CRON || "30 3 * * *",
     handler: runDlqCleanupJob,
+  },
+  {
+    name: "airtel-disbursement-reconciliation",
+    // Every minute - polls Airtel disbursement status for payouts whose
+    // webhook callback has been delayed beyond 60 seconds (#1955)
+    schedule: process.env.AIRTEL_RECONCILIATION_CRON || "* * * * *",
+    handler: async () => {
+      await runAirtelReconciliationWorker();
+    },
+  },
+  {
+    name: "sep38-quote-expiration",
+    // Every minute - sweeps expired firm quotes and releases reserved liquidity
+    schedule: process.env.SEP38_QUOTE_EXPIRATION_CRON || "* * * * *",
+    handler: runQuoteExpirationJob,
   },
 ];
 
 async function runJob(job: JobConfig): Promise<void> {
   console.log(`[${job.name}] Starting job`);
   try {
-    await job.handler();
+    // Wrap every scheduled job in an OTel span so cron-driven work shows up in
+    // the same trace waterfall as HTTP-triggered activity.
+    await withJobTrace(
+      `scheduler.${job.name}`,
+      undefined,
+      () => job.handler(),
+      {
+        "job.name": job.name,
+        "job.schedule": job.schedule,
+        "job.source": "cron",
+      },
+    );
     console.log(`[${job.name}] Completed`);
   } catch (err) {
     logger.error(`[${job.name}] Failed:`, err);
@@ -241,7 +312,12 @@ export function startJobs(): void {
       );
       continue;
     }
-    cron.schedule(job.schedule, () => runJob(job));
+    const run = () => runJob(job);
+    if (job.timezone) {
+      cron.schedule(job.schedule, run, { timezone: job.timezone });
+    } else {
+      cron.schedule(job.schedule, run);
+    }
     console.log(`[scheduler] "${job.name}" scheduled - ${job.schedule}`);
   }
 

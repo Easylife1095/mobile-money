@@ -1,8 +1,8 @@
 import { redisClient } from "../config/redis";
 import logger from "../utils/logger";
 
-const MAX_ATTEMPTS = 3;
-const LOCKOUT_DURATION_SECONDS = 15 * 60; // 15 minutes
+export const MAX_ATTEMPTS = 5;
+export const LOCKOUT_DURATION_SECONDS = 15 * 60; // 15 minutes
 
 export interface TwoFactorRateLimitHeaders {
   limit: number;
@@ -38,14 +38,22 @@ export class TwoFactorRateLimiter {
     const key = this.getKey(userId);
     const count = await redisClient.incr(key);
 
-    if (count === 1) {
-      // Set expiry on first failure
+    if (count === 1 || count === MAX_ATTEMPTS) {
+      // Start the failure window on the first miss, and restart it when the
+      // lockout begins so the account stays locked for the full duration.
       await redisClient.expire(key, LOCKOUT_DURATION_SECONDS);
     }
 
-    if (Number(count) >= MAX_ATTEMPTS) {
+    if (count === MAX_ATTEMPTS) {
       logger.warn(
-        `[2FA] User ${userId} has been locked out after ${count} failed attempts`,
+        {
+          event: "security.2fa.account_lockout",
+          severity: "high",
+          userId,
+          attempts: count,
+          lockoutSeconds: LOCKOUT_DURATION_SECONDS,
+        },
+        `[2FA] SECURITY ALERT: user ${userId} locked out after ${count} failed 2FA attempts`,
       );
     }
 

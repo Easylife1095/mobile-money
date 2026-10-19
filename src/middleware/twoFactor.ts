@@ -7,6 +7,7 @@ import {
 } from "../auth/2fa";
 import {
   twoFactorRateLimiter,
+  MAX_ATTEMPTS,
   type TwoFactorRateLimitHeaders,
 } from "../services/twoFactorRateLimiter";
 // import { getUserById } from "../services/userService";
@@ -106,7 +107,7 @@ export function requireTwoFactor(
 
         // 4. Verification failed - increment count
         const newCount = await twoFactorRateLimiter.incrementFailures(user.id);
-        const triesLeft = Math.max(0, 3 - newCount);
+        const triesLeft = Math.max(0, MAX_ATTEMPTS - newCount);
         const headers = await twoFactorRateLimiter.getRateLimitHeaders(user.id);
         applyTwoFactorRateLimitHeaders(res, headers);
 

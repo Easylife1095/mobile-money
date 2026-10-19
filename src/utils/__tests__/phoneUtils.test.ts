@@ -6,8 +6,10 @@ import {
   parseFlexiblePhoneNumber,
   detectProvider,
   validatePhoneProviderMatch,
+  normalizeCemacWaemuE164,
   PROVIDER_PREFIXES,
   PROVIDER_PHONE_FORMATS,
+  CEMAC_WAEMU_REGIONS,
 } from "../phoneUtils";
 
 describe("phoneUtils", () => {
@@ -230,12 +232,120 @@ describe("phoneUtils", () => {
       expect(res.error).toContain("does not belong to the AIRTEL network");
     });
 
+    it("validates local phone numbers with country prefix overrides", () => {
+      // Uganda MTN local number with country override
+      expect(validatePhoneProviderMatch("0770000000", "mtn", "UG").valid).toBe(
+        true,
+      );
+
+      // Ghana MTN local number with country override
+      expect(validatePhoneProviderMatch("0240000000", "mtn", "GH").valid).toBe(
+        true,
+      );
+
+      // Uganda Airtel local number with country override
+      expect(
+        validatePhoneProviderMatch("0700000000", "airtel", "UG").valid,
+      ).toBe(true);
+
+      // Tanzania Vodacom local number with country override
+      expect(
+        validatePhoneProviderMatch("0740000000", "vodacom", "TZ").valid,
+      ).toBe(true);
+
+      // Cameroon MTN local number
+      expect(validatePhoneProviderMatch("670000000", "mtn", "CM").valid).toBe(
+        true,
+      );
+    });
+
     it("returns invalid for unsupported provider or empty input", () => {
       expect(validatePhoneProviderMatch("+237670000000", "unknown").valid).toBe(
         false,
       );
       expect(validatePhoneProviderMatch("", "mtn").valid).toBe(false);
       expect(validatePhoneProviderMatch("+237670000000", "").valid).toBe(false);
+    });
+  });
+
+  describe("detectProvider with countryOverride", () => {
+    it("detects provider from local number with country override", () => {
+      expect(detectProvider("0770000000", "UG")).toBe("mtn");
+      expect(detectProvider("0700000000", "UG")).toBe("airtel");
+      expect(detectProvider("0240000000", "GH")).toBe("mtn");
+      expect(detectProvider("0740000000", "TZ")).toBe("vodacom");
+      expect(detectProvider("670000000", "CM")).toBe("mtn");
+    });
+  });
+
+  describe("formatPhoneForProvider with countryOverride", () => {
+    it("formats local number with country override", () => {
+      expect(formatPhoneForProvider("0770000000", "mtn", "UG")).toBe(
+        "+256770000000",
+      );
+      expect(formatPhoneForProvider("0700000000", "airtel", "UG")).toBe(
+        "700000000",
+      );
+      expect(formatPhoneForProvider("0240000000", "mtn", "GH")).toBe(
+        "+233240000000",
+      );
+    });
+  });
+
+  describe("normalizeCemacWaemuE164 (#1963)", () => {
+    it("strips whitespace, dashes, and local leading zero for each supported region", () => {
+      expect(normalizeCemacWaemuE164("+237 670 000 000", "CM")).toBe(
+        "+237670000000",
+      );
+      expect(normalizeCemacWaemuE164("+221-77-000-00-00", "SN")).toBe(
+        "+221770000000",
+      );
+      expect(normalizeCemacWaemuE164("0707000000", "CI")).toBe(
+        "+2250707000000",
+      );
+      expect(normalizeCemacWaemuE164("08031234567", "NG")).toBe(
+        "+2348031234567",
+      );
+      expect(normalizeCemacWaemuE164("0712345678", "KE")).toBe("+254712345678");
+      expect(normalizeCemacWaemuE164("0240000000", "GH")).toBe("+233240000000");
+    });
+
+    it("returns the E.164 string unchanged when already normalized", () => {
+      for (const [input, region] of [
+        ["+237670000000", "CM"],
+        ["+221770000000", "SN"],
+        ["+2250707000000", "CI"],
+        ["+2348031234567", "NG"],
+        ["+254712345678", "KE"],
+        ["+233241234567", "GH"],
+      ] as const) {
+        expect(normalizeCemacWaemuE164(input, region)).toBe(input);
+      }
+    });
+
+    it("throws for a number that is invalid in the given region", () => {
+      expect(() => normalizeCemacWaemuE164("123", "CM")).toThrow(
+        /Invalid phone number/,
+      );
+      expect(() => normalizeCemacWaemuE164("not-a-number", "GH")).toThrow(
+        /Invalid phone number/,
+      );
+      // Valid length for CM but wrong country's dialing code entirely.
+      expect(() => normalizeCemacWaemuE164("+14155552671", "CM")).toThrow(
+        /Invalid phone number/,
+      );
+    });
+
+    it("throws for a region outside the supported CEMAC/WAEMU set", () => {
+      expect(() =>
+        normalizeCemacWaemuE164("+256770000000", "UG" as never),
+      ).toThrow(/Unsupported region/);
+    });
+
+    it("exports the exact set of six supported regions", () => {
+      expect([...CEMAC_WAEMU_REGIONS].sort()).toEqual(
+        ["CI", "CM", "GH", "KE", "NG", "SN"].sort(),
+      );
     });
   });
 

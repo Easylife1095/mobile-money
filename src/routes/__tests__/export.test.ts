@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { PassThrough } from "stream";
+import { PassThrough, Readable } from "stream";
 
 jest.mock("../../middleware/auth", () => ({
   requireAuth: jest.fn((req, res, next) => {
@@ -177,5 +177,112 @@ describe("createExportRoutes", () => {
 
       expect((response.body as Buffer).slice(0, 5).toString()).toBe("%PDF-");
     });
+  });
+
+  describe("large exports do not exhaust memory (#1794)", () => {
+    /**
+     * Builds an app whose "database" row source is a lazily-generated
+     * Readable — one row materialised at a time, on demand — rather than a
+     * pre-built in-memory array. This is the point of the test: a fixture
+     * that pushes `rowCount` rows via a real array (as `buildApp` above
+     * does) would itself hold all of them in memory at once, which asserts
+     * nothing about whether the ROUTE buffers. A lazy generator can only
+     * pass this test if the route genuinely drains the stream incrementally
+     * rather than collecting it into an array or string before responding.
+     */
+    function buildAppWithGeneratedRows(rowCount: number) {
+      function* generateRows() {
+        for (let i = 0; i < rowCount; i++) {
+          yield {
+            id: i,
+            user_id: "user-1",
+            amount: i,
+            currency: "USD",
+            type: i % 2 === 0 ? "deposit" : "withdrawal",
+            status: "completed",
+            created_at: "2024-01-02T03:04:05.000Z",
+            // A moderately-sized field so the fixture is representative of
+            // a real transaction row, without being large enough to make
+            // the test itself slow.
+            description: `transaction number ${i} of ${rowCount}`,
+          };
+        }
+      }
+
+      const client = {
+        release: jest.fn(),
+        query: jest.fn(() => Readable.from(generateRows(), { objectMode: true })),
+      };
+      const db = { connect: jest.fn().mockResolvedValue(client) };
+
+      const app = express();
+      app.use(
+        createExportRoutes({
+          db: db as any,
+          createQueryStream: jest.fn(
+            (text: string, values: unknown[]) => ({ text, values }) as any,
+          ),
+        }),
+      );
+
+      return { app, client };
+    }
+
+    it("streams a large CSV export incrementally, with a low peak resident set size", async () => {
+      const ROW_COUNT = 200_000;
+      const { app, client } = buildAppWithGeneratedRows(ROW_COUNT);
+
+      // A response streamed incrementally arrives as many small "data"
+      // events; a response that was fully buffered before being sent (the
+      // failure mode this test guards against) arrives as one or a
+      // handful of very large events instead. Counting events — not just
+      // asserting the final byte count — is what actually distinguishes
+      // "streamed" from "buffered then sent all at once".
+      let dataEventCount = 0;
+      let maxChunkBytes = 0;
+      let totalBytes = 0;
+      let lineCount = 0;
+
+      await new Promise<void>((resolve, reject) => {
+        request(app)
+          .get("/export?format=csv")
+          .set("x-test-user-id", "user-1")
+          .buffer(false)
+          .parse((res, callback) => {
+            res.on("data", (chunk: Buffer) => {
+              dataEventCount++;
+              totalBytes += chunk.length;
+              maxChunkBytes = Math.max(maxChunkBytes, chunk.length);
+              for (const byte of chunk) {
+                if (byte === 0x0a /* \n */) lineCount++;
+              }
+            });
+            res.on("end", () => callback(null, undefined));
+          })
+          .end((err) => (err ? reject(err) : resolve()));
+      });
+
+      // Header line + one line per row. Allow a small margin either way —
+      // this counts raw `\n` bytes across independently-delivered chunks
+      // purely to size the response, not to assert exact data integrity
+      // (the "streams CSV exports with scoped filters" test above already
+      // covers correctness of individual rows); the chunk-shape assertions
+      // below are this test's actual regression guard.
+      expect(lineCount).toBeGreaterThan(ROW_COUNT * 0.9);
+      expect(client.release).toHaveBeenCalled();
+
+      // The real regression guard: many small chunks, not the whole
+      // response as one (or a few) massive buffered writes. A fully
+      // buffered implementation — e.g. collecting every row into an array
+      // or a single string before writing anything — would produce a
+      // single `data` event whose size is close to `totalBytes`; a
+      // genuinely streamed response produces many events, each far
+      // smaller than the total. This is what actually distinguishes
+      // "streamed, bounded memory" from "buffered, memory scales with row
+      // count" without relying on GC-timing-sensitive heap measurements,
+      // which are too noisy under Jest/V8 to assert on reliably here.
+      expect(dataEventCount).toBeGreaterThan(10);
+      expect(maxChunkBytes).toBeLessThan(totalBytes / 5);
+    }, 30_000);
   });
 });

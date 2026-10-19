@@ -132,6 +132,7 @@ describe("Security Scanning Tools & Pipeline Tests", () => {
     let app: express.Application;
 
     beforeEach(() => {
+      process.env.MTN_CALLBACK_SECRET = "test-secret-key-12345";
       app = express();
       app.use(
         express.json({
@@ -160,7 +161,7 @@ describe("Security Scanning Tools & Pipeline Tests", () => {
       const rawString = JSON.stringify(payload);
       const signature = createHmac("sha256", "test-secret-key-12345")
         .update(rawString)
-        .digest("base64");
+        .digest("hex");
 
       const res = await request(app)
         .post("/test-secure-webhook")
