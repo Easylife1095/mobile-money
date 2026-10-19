@@ -654,7 +654,9 @@ async function initializeRuntime(): Promise<void> {
       startWebhookRetryWorker,
       startRefundWorker,
       startReceivingAnchorWebhookWorker,
+      startRedisBackpressureMonitor,
     } = await import("./queue/index.js");
+    startRedisBackpressureMonitor();
     startProviderBalanceAlertWorker();
     startAccountingTokenRefreshWorker();
     startWebhookRetryWorker();
