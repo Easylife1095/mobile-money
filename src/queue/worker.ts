@@ -38,6 +38,10 @@ import { amlScreeningService } from "../services/amlScreening";
 
 import { queueOptions, getWorkerConcurrency } from "./config";
 import { providerQueueControl } from "./providerQueueControl";
+import {
+  createProviderWorker,
+  isProviderRateLimitedQueuesEnabled,
+} from "./providerRateLimitedQueues";
 
 const transactionModel = new TransactionModel();
 const mobileMoneyService = new MobileMoneyService();
@@ -750,6 +754,44 @@ if (NATS_QUEUE_ENABLED) {
     .catch((err) => logger.error({ err }, "NATS JetStream Consumer error"));
 }
 
+/**
+ * Shared BullMQ job processor, used by both the default single-queue worker
+ * below and, when `PROVIDER_RATE_LIMITED_QUEUES_ENABLED=true` (#2277), by
+ * each provider's own rate-limited worker - so per-provider rate limiting
+ * reuses the exact same transaction-processing logic rather than
+ * duplicating it per provider.
+ */
+async function handleTransactionJob(
+  job: Parameters<Parameters<typeof createProviderWorker>[1]>[0],
+  queueName: string,
+) {
+  // Provider paused for maintenance (#2282): divert the job to the
+  // provider's hold queue before any provider I/O. It is re-queued
+  // here automatically when the provider is resumed.
+  if (await providerQueueControl.divertIfPaused(job)) {
+    return {
+      success: false,
+      transactionId: job.data.transactionId,
+      error: "provider_paused",
+    };
+  }
+
+  return withJobTrace(
+    "queue.transaction.process",
+    job.data,
+    () => processTransaction(job.data),
+    {
+      "messaging.system": "bullmq",
+      "messaging.destination.name": queueName,
+      "messaging.message.id": job.id ?? "",
+      "job.name": job.name,
+      "job.attempt": job.attemptsMade + 1,
+      "transaction.id": job.data.transactionId,
+      "transaction.type": job.data.type,
+    },
+  );
+}
+
 export const transactionWorker:
   | Worker<TransactionJobData, TransactionJobResult>
   | {
@@ -762,38 +804,31 @@ export const transactionWorker:
     }
   : new Worker<TransactionJobData, TransactionJobResult>(
       TRANSACTION_QUEUE_NAME,
-      async (job) => {
-        // Provider paused for maintenance (#2282): divert the job to the
-        // provider's hold queue before any provider I/O. It is re-queued
-        // here automatically when the provider is resumed.
-        if (await providerQueueControl.divertIfPaused(job)) {
-          return {
-            success: false,
-            transactionId: job.data.transactionId,
-            error: "provider_paused",
-          };
-        }
-
-        return withJobTrace(
-          "queue.transaction.process",
-          job.data,
-          () => processTransaction(job.data),
-          {
-            "messaging.system": "bullmq",
-            "messaging.destination.name": TRANSACTION_QUEUE_NAME,
-            "messaging.message.id": job.id ?? "",
-            "job.name": job.name,
-            "job.attempt": job.attemptsMade + 1,
-            "transaction.id": job.data.transactionId,
-            "transaction.type": job.data.type,
-          },
-        );
-      },
+      (job) => handleTransactionJob(job, TRANSACTION_QUEUE_NAME),
       { ...queueOptions, concurrency: CONCURRENCY },
     );
 
+/**
+ * Per-provider rate-limited workers (#2277). Each provider gets its own
+ * BullMQ Worker consuming its own queue (src/queue/providerRateLimitedQueues.ts),
+ * configured with that provider's `limiter` (max jobs/sec), so e.g. MTN and
+ * Orange are throttled independently and a burst is delayed - not
+ * failed - once the configured rate is hit. Only created when
+ * `PROVIDER_RATE_LIMITED_QUEUES_ENABLED=true`; `addTransactionJob` only
+ * routes jobs here when the same flag is set, so the two stay in sync.
+ */
+const providerWorkers: Array<Worker<TransactionJobData, TransactionJobResult>> =
+  !NATS_QUEUE_ENABLED && isProviderRateLimitedQueuesEnabled()
+    ? ["mtn", "orange", "airtel", "vodafone"].map((provider) =>
+        createProviderWorker(provider, (job) =>
+          handleTransactionJob(job, `transaction-provider-${provider}`),
+        ),
+      )
+    : [];
+
 export async function closeWorker(): Promise<void> {
   await transactionWorker.close();
+  await Promise.all(providerWorkers.map((w) => w.close()));
   if (NATS_QUEUE_ENABLED) {
     await natsManager.close();
   }

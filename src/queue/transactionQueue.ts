@@ -3,6 +3,10 @@ import { queueOptions } from "./config";
 import { injectTraceContext } from "./jobTracing";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { providerQueueControl } from "./providerQueueControl";
+import {
+  addProviderRateLimitedJob,
+  isProviderRateLimitedQueuesEnabled,
+} from "./providerRateLimitedQueues";
 import { VipTier } from "../utils/fees";
 
 export const TRANSACTION_QUEUE_NAME = "transaction-processing-queue";
@@ -127,6 +131,19 @@ export async function addTransactionJob(
     return providerQueueControl.hold(injectTraceContext(jobData), {
       jobId: options?.jobId,
       priority: resolvedPriority,
+    });
+  }
+
+  // Per-provider BullMQ rate limiting (#2277): when enabled, route onto the
+  // provider's own dedicated queue (each with its own Worker + `limiter`)
+  // instead of the shared queue below, so e.g. MTN and Orange jobs are
+  // throttled independently. Repeatable schedules keep using the shared
+  // queue, matching the maintenance-hold behavior above.
+  if (!options?.repeat && isProviderRateLimitedQueuesEnabled()) {
+    return addProviderRateLimitedJob(injectTraceContext(jobData), {
+      jobId: options?.jobId,
+      priority: resolvedPriority,
+      delay: options?.delay,
     });
   }
 
