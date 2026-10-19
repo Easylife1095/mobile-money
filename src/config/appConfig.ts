@@ -114,6 +114,32 @@ export const configSchema = convict({
     },
   },
 
+  // SEP-24 Interactive Deposit/Withdrawal
+  sep24: {
+    interactiveSessionExpiryMinutes: {
+      doc:
+        "How long a SEP-24 interactive deposit/withdrawal session stays " +
+        "valid (from creation) before it is treated as expired and the " +
+        "interactive URL shows an expiration notice with a renewal option.",
+      format: "nat",
+      default: 15,
+      env: "SEP24_INTERACTIVE_SESSION_EXPIRY_MINUTES",
+    },
+  },
+
+  // SEP-38 Quotes & Price Streams
+  sep38: {
+    spreadMarginsByPair: {
+      doc:
+        "Per-currency-pair indicative-rate spread margin overrides, in basis points. " +
+        'JSON object keyed by "<SELL_CODE>_<BUY_CODE>" (e.g. {"XAF_USDC":15,"NGN_USDC":35}). ' +
+        "A pair not present here falls back to SEP38_SPREAD_BPS.",
+      format: String,
+      default: "{}",
+      env: "SEP38_SPREAD_MARGINS_BY_PAIR",
+    },
+  },
+
   // Logging
   logging: {
     enableSlowQueryLogging: {
