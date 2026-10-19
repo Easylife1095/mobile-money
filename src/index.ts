@@ -39,6 +39,7 @@ import { transactionDisputeRoutes, disputeRoutes } from "./routes/disputes";
 import { statsRoutes } from "./routes/stats";
 import { contactsRoutes } from "./routes/contacts";
 import { reportsRoutes } from "./routes/reports";
+import { requireFinanceAccess } from "./middleware/requireFinanceAccess";
 import feesRoutes from "./routes/fees";
 import deepHealthRoutes from "./routes/health";
 import { docsRouter } from "./routes/docs";
@@ -465,6 +466,9 @@ app.use("/api/multisig", multisigCallbacksRouter);
 app.use("/api/admin", createCorsMiddleware());
 app.use("/api/admin/withdrawals", adminWithdrawalsRouter);
 app.use("/api/reports", reportsRoutes);
+app.use("/api/v1/reports", reportsRoutes);
+// Gate any financial export handler mounted under this prefix.
+app.use("/api/v1/export/financial", requireAuth, requireFinanceAccess);
 app.use("/api/fees", feesRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/kyc", createKYCRoutes(pool));
