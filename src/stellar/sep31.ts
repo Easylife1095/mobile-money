@@ -62,7 +62,6 @@ function calculateFee(amount: number, options: FeeOptions = {}): FeeResult {
   };
 }
 
-
 // --- SEP-31 Status State Machine ---
 // Valid statuses per SEP-31 spec
 export enum Sep31Status {
@@ -267,9 +266,13 @@ router.post(
     const ip = req.ip || req.connection.remoteAddress || "0.0.0.0";
     const risk = await ipReputationService.checkIP(ip);
     if (risk.isTorExitNode) {
-      throw createError(ERROR_CODES.UNAUTHORIZED, "High risk IP detected: Tor Exit Node", {
-        error: "High risk IP detected",
-      });
+      throw createError(
+        ERROR_CODES.UNAUTHORIZED,
+        "High risk IP detected: Tor Exit Node",
+        {
+          error: "High risk IP detected",
+        },
+      );
     }
 
     const {
@@ -375,13 +378,34 @@ router.post(
       );
     }
 
+    // Descriptive SEP-31 error for missing corridor fields (#2263): a
+    // cross-border transfer needs a destination country to route and
+    // validate against, same as receiver_id/sender_id above.
+    const destinationCountryCode =
+      req.body.country_code || req.body.destination_country;
+    if (!destinationCountryCode) {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        "Missing required corridor field: destination_country (or country_code)",
+        {
+          error: "invalid_request",
+          message:
+            "Missing required corridor field: destination_country (or country_code)",
+        },
+      );
+    }
+
     // Strict KYC schema validation per country specifications (#1945)
-    const { validateSep31KycFields } = await import("../validators/sep31.js");
+    const {
+      validateSep31KycFields,
+      validateReceiverPhoneCountryMatch,
+      validateSenderKycApproved,
+    } = await import("../validators/sep31.js");
     const kycValidation = validateSep31KycFields(
       fields,
       finalSenderId,
       finalReceiverId,
-      req.body.country_code || req.body.destination_country,
+      destinationCountryCode,
     );
     if (!kycValidation.valid) {
       throw createError(
@@ -389,11 +413,54 @@ router.post(
         kycValidation.error || "Missing mandatory KYC compliance fields",
         {
           error: "invalid_request",
-          message: kycValidation.error || "Missing mandatory KYC compliance fields",
+          message:
+            kycValidation.error || "Missing mandatory KYC compliance fields",
           details: {
             missingSenderFields: kycValidation.missingSenderFields,
             missingReceiverFields: kycValidation.missingReceiverFields,
           },
+        },
+      );
+    }
+
+    // Receiver phone / destination country-code format validation (#2263)
+    const receiverMobileNumber =
+      txFields.receiver?.mobile_number ||
+      txFields.receiver_mobile_number ||
+      fields?.receiver?.mobile_number;
+    const phoneCountryValidation = validateReceiverPhoneCountryMatch(
+      receiverMobileNumber,
+      destinationCountryCode,
+    );
+    if (!phoneCountryValidation.valid) {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        phoneCountryValidation.error ||
+          "Invalid receiver phone/country combination",
+        {
+          error: "invalid_request",
+          message:
+            phoneCountryValidation.error ||
+            "Invalid receiver phone/country combination",
+        },
+      );
+    }
+
+    // Sender SEP-12 KYC approval status (#2263)
+    const { UserModel } = await import("../models/users.js");
+    const userModel = new UserModel();
+    const senderKycValidation = await validateSenderKycApproved(
+      finalSenderId,
+      (id) => userModel.findById(id),
+    );
+    if (!senderKycValidation.valid) {
+      throw createError(
+        ERROR_CODES.UNAUTHORIZED,
+        senderKycValidation.error || "Sender KYC status is not approved",
+        {
+          error: "invalid_request",
+          message:
+            senderKycValidation.error || "Sender KYC status is not approved",
         },
       );
     }
@@ -465,7 +532,8 @@ router.post(
             senderName: senderScreeningIdentifier,
             receiverName: receiverScreeningIdentifier,
             dailyVolumeUsd:
-              dailyVolumeUsd + (Number.isFinite(parsedAmount) ? parsedAmount : 0),
+              dailyVolumeUsd +
+              (Number.isFinite(parsedAmount) ? parsedAmount : 0),
           },
           { persistAudit: false },
         );
