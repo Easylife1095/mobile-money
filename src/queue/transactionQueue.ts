@@ -1,6 +1,9 @@
 import { Queue } from "bullmq";
 import { queueOptions } from "./config";
+import { injectTraceContext } from "./jobTracing";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
+import { providerQueueControl } from "./providerQueueControl";
+import { VipTier } from "../utils/fees";
 
 export const TRANSACTION_QUEUE_NAME = "transaction-processing-queue";
 export const TRANSACTION_JOB_NAME = "transaction-process";
@@ -17,13 +20,52 @@ export interface TransactionJobData {
   /** IP address of the originating client, forwarded through the queue for blacklist enforcement. */
   clientIp?: string;
   requestId?: string;
+  /** Merchant or user VIP tier to influence processing priority. */
+  tier?: VipTier | string;
+  /** Explicit job priority (1 to 10), where 1 is highest priority. */
+  priority?: number;
   _traceId?: string;
+  /** Serialized W3C `traceparent` injected at enqueue time (see queue/jobTracing). */
+  _traceparent?: string;
 }
 
 export interface TransactionJobResult {
   success: boolean;
   transactionId: string;
   error?: string;
+}
+
+/**
+ * Calculate queue priority (1 to 10) based on merchant VIP tier or transaction amount.
+ * In BullMQ, lower numerical value = higher execution priority (1 is highest, 10 is standard/lowest).
+ */
+export function calculateTransactionPriority(params?: {
+  tier?: VipTier | string;
+  amount?: string | number;
+  priority?: number;
+}): number {
+  if (params?.priority !== undefined && Number.isFinite(Number(params.priority))) {
+    const p = Math.round(Number(params.priority));
+    return Math.max(1, Math.min(10, p));
+  }
+
+  const tier = params?.tier ? String(params.tier).toUpperCase() : undefined;
+  if (tier === VipTier.DIAMOND || tier === "DIAMOND") return 1;
+  if (tier === VipTier.PLATINUM || tier === "PLATINUM") return 2;
+  if (tier === VipTier.GOLD || tier === "GOLD") return 4;
+  if (tier === VipTier.SILVER || tier === "SILVER") return 6;
+
+  // Next evaluate based on transaction amount thresholds
+  const amountNum = params?.amount !== undefined ? Number(params.amount) : 0;
+  if (Number.isFinite(amountNum) && amountNum > 0) {
+    if (amountNum >= 50000) return 1;
+    if (amountNum >= 20000) return 2;
+    if (amountNum >= 5000) return 4;
+    if (amountNum >= 1000) return 6;
+  }
+
+  // Standard/default priority
+  return 10;
 }
 
 // Instantiate the BullMQ Queue. The old RabbitMQ work queue has been
@@ -55,6 +97,7 @@ export const transactionQueue = new Queue<
 
 /**
  * Enqueue a transaction for processing.
+ * Accepts optional priority (1-10) or auto-calculates from tier / amount.
  * Returns a job-shaped result so callers can surface a jobId.
  */
 export async function addTransactionJob(
@@ -66,15 +109,47 @@ export async function addTransactionJob(
     jobId?: string;
   },
 ): Promise<{ id: string | undefined }> {
-  const job = await transactionQueue.add(TRANSACTION_JOB_NAME, data, {
-    jobId: options?.jobId ?? data.transactionId,
-    priority: options?.priority,
-    delay: options?.delay,
-    repeat: options?.repeat,
+  const resolvedPriority = calculateTransactionPriority({
+    priority: options?.priority ?? data.priority,
+    tier: data.tier,
+    amount: data.amount,
   });
+
+  const jobData = {
+    ...data,
+    priority: resolvedPriority,
+  };
+
+  // Providers under maintenance (#2282): park the job in the provider's hold
+  // queue instead of dispatching it. Repeatable schedules are left alone; the
+  // worker diverts their individual runs if they fire while paused.
+  if (!options?.repeat && (await providerQueueControl.isPaused(data.provider))) {
+    return providerQueueControl.hold(injectTraceContext(jobData), {
+      jobId: options?.jobId,
+      priority: resolvedPriority,
+    });
+  }
+
+  // Embed the active OpenTelemetry context so the worker continues the same
+  // distributed trace (HTTP → queue → processor).
+  const job = await transactionQueue.add(
+    TRANSACTION_JOB_NAME,
+    injectTraceContext(jobData),
+    {
+      jobId: options?.jobId ?? data.transactionId,
+      priority: resolvedPriority,
+      delay: options?.delay,
+      repeat: options?.repeat,
+    },
+  );
 
   return { id: job.id ?? data.transactionId };
 }
+
+/**
+ * Alias for addTransactionJob conforming to the issue interface.
+ */
+export const addTransactionToQueue = addTransactionJob;
 
 /**
  * Fetch a job by ID, falling back to the transaction row when the job has

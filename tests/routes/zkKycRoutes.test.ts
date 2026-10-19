@@ -1,8 +1,7 @@
 import request from "supertest";
 import { Pool } from "pg";
 import express from "express";
-process.env.KYC_AUTHORITY_PRIVATE_KEY =
-  "1".repeat(64);
+process.env.KYC_AUTHORITY_PRIVATE_KEY = "1".repeat(64);
 process.env.KYC_AUTHORITY_PUBLIC_KEY =
   "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8";
 process.env.DB_ENCRYPTION_KEY = "development-encryption-key-32-chars-long";
@@ -22,13 +21,13 @@ jest.mock("redis", () => ({
   })),
 }));
 
-jest.mock("connect-redis", () => {
-  return jest.fn(() => ({
+jest.mock("connect-redis", () => ({
+  RedisStore: jest.fn(() => ({
     get: jest.fn(),
     set: jest.fn(),
     destroy: jest.fn(),
-  }));
-});
+  })),
+}));
 
 jest.mock("bullmq", () => ({
   Queue: jest.fn().mockImplementation(() => ({
@@ -45,7 +44,9 @@ jest.mock("../../src/config/s3", () => ({
   getS3Client: jest.fn(() => ({ send: jest.fn() })),
   s3Config: { bucket: "test-bucket", region: "us-east-1" },
   getS3ObjectUrl: jest.fn((key) => `https://example.com/${key}`),
-  getSignedObjectUrl: jest.fn(async (key) => `https://example.com/${key}?signed=1`),
+  getSignedObjectUrl: jest.fn(
+    async (key) => `https://example.com/${key}?signed=1`,
+  ),
 }));
 
 import { createKYCRoutes } from "../../src/routes/kycRoutes";
@@ -78,29 +79,30 @@ describe("ZK KYC Routes", () => {
 
   beforeEach(() => {
     (KYCService as jest.MockedClass<typeof KYCService>).mockImplementation(
-      () => ({
-        createApplicant: jest.fn(),
-        getApplicant: jest.fn(),
-        uploadDocument: jest.fn(),
-        createWorkflowRun: jest.fn(),
-        generateSDKToken: jest.fn(),
-        getVerificationStatus: jest.fn(),
-        handleWebhook: jest.fn(),
-        updateUserKYCLevel: jest.fn(),
-        getTransactionLimits: jest.fn().mockReturnValue({
-          dailyLimit: 1000,
-          perTransactionLimit: { min: 1, max: 500 },
-        }),
-      }) as any,
+      () =>
+        ({
+          createApplicant: jest.fn(),
+          getApplicant: jest.fn(),
+          uploadDocument: jest.fn(),
+          createWorkflowRun: jest.fn(),
+          generateSDKToken: jest.fn(),
+          getVerificationStatus: jest.fn(),
+          handleWebhook: jest.fn(),
+          updateUserKYCLevel: jest.fn(),
+          getTransactionLimits: jest.fn().mockReturnValue({
+            dailyLimit: 1000,
+            perTransactionLimit: { min: 1, max: 500 },
+          }),
+        }) as any,
     );
 
     mockZkProofService = {
       issueAddressProof: jest.fn(),
       verifyAddressProof: jest.fn(),
     };
-    (ZkProofService as jest.MockedClass<typeof ZkProofService>).mockImplementation(
-      () => mockZkProofService as any,
-    );
+    (
+      ZkProofService as jest.MockedClass<typeof ZkProofService>
+    ).mockImplementation(() => mockZkProofService as any);
 
     mockPool = {
       query: jest.fn(),
@@ -117,7 +119,9 @@ describe("ZK KYC Routes", () => {
   });
 
   it("issues an address-validity proof without storing a raw utility bill reference", async () => {
-    mockPool.query.mockResolvedValueOnce({ rows: [{ user_id: "test-user-id" }] } as any);
+    mockPool.query.mockResolvedValueOnce({
+      rows: [{ user_id: "test-user-id" }],
+    } as any);
     mockZkProofService.issueAddressProof.mockResolvedValue({
       proofId: "proof-id",
       vaultId: "vault-id",
@@ -161,7 +165,9 @@ describe("ZK KYC Routes", () => {
     const issuedAt = new Date().toISOString();
     const verifiedAt = new Date().toISOString();
 
-    mockPool.query.mockResolvedValueOnce({ rows: [{ user_id: "test-user-id" }] } as any);
+    mockPool.query.mockResolvedValueOnce({
+      rows: [{ user_id: "test-user-id" }],
+    } as any);
     mockZkProofService.verifyAddressProof.mockResolvedValue({
       proofId: "proof-id",
       vaultId: "vault-id",

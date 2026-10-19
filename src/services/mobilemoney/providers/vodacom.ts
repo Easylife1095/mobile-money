@@ -3,6 +3,7 @@ import crypto from "crypto";
 import logger from "../../../utils/logger";
 import { maskPII } from "../../../utils/masking";
 import { resolveVodacomError } from "./errors/vodacomErrorMatrix";
+import { attachCorrelationIdInterceptor } from "../../../utils/correlationIdInterceptor";
 
 function encrypt(data: string, publicKeyPem: string): string {
   if (!publicKeyPem) {
@@ -56,6 +57,7 @@ export class VodacomProvider {
         Origin: "*",
       },
     });
+    attachCorrelationIdInterceptor(this.client);
   }
 
   private async getAccessToken(): Promise<string> {
@@ -266,7 +268,7 @@ export class VodacomProvider {
       const code = response.data?.output_ResponseCode;
       if (code === "INS-0") {
         const txStatus = String(
-          response.data?.output_TransactionStatus || "",
+          response.data?.output_ResponseTransactionStatus || response.data?.output_TransactionStatus || "",
         ).toUpperCase();
         if (
           txStatus === "SUCCESSFUL" ||

@@ -1,4 +1,4 @@
-import * as StellarSdk from "stellar-sdk";
+import * as StellarSdk from "@stellar/stellar-sdk";
 import { StellarService } from "../../src/services/stellar/stellarService";
 import { pool } from "../../src/config/database";
 import {
@@ -8,7 +8,7 @@ import {
 
 // ── mock asset service to return a non-native asset ──────────────────────────
 jest.mock("../../src/services/stellar/assetService", () => {
-  const StellarSdkMock = require("stellar-sdk");
+  const StellarSdkMock = require("@stellar/stellar-sdk");
   const issuer = StellarSdkMock.Keypair.random().publicKey();
   return {
     AssetService: jest.fn().mockImplementation(() => ({})),

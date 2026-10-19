@@ -15,12 +15,12 @@ const localFallbackCache: Array<{ key: string; value: string }> = [];
 let isRedisClusterOffline = false;
 
 function getLocalCache(key: string): string | null {
-  const item = localFallbackCache.find(c => c.key === key);
+  const item = localFallbackCache.find((c) => c.key === key);
   return item ? item.value : null;
 }
 
 function setLocalCache(key: string, value: string): void {
-  const item = localFallbackCache.find(c => c.key === key);
+  const item = localFallbackCache.find((c) => c.key === key);
   if (item) {
     item.value = value;
   } else {
@@ -29,7 +29,7 @@ function setLocalCache(key: string, value: string): void {
 }
 
 function delLocalCache(key: string): void {
-  const index = localFallbackCache.findIndex(c => c.key === key);
+  const index = localFallbackCache.findIndex((c) => c.key === key);
   if (index !== -1) {
     localFallbackCache.splice(index, 1);
   }
@@ -289,7 +289,10 @@ async function setupSentinelSwitchMasterListener(): Promise<void> {
   console.warn("Redis Sentinel: unable to attach +switch-master subscriber");
 }
 
-async function handleClusterRedirection(host: string, port: number): Promise<void> {
+async function handleClusterRedirection(
+  host: string,
+  port: number,
+): Promise<void> {
   if (failoverInFlight) return;
   failoverInFlight = true;
   try {
@@ -300,17 +303,24 @@ async function handleClusterRedirection(host: string, port: number): Promise<voi
     activeRedisUrl = nextUrl;
     (redisClient as any).options.url = nextUrl;
 
-    console.warn(`Redis Cluster: Redirection detected. Re-configuring client to new master: ${nextUrl} (from ${previousUrl})`);
+    console.warn(
+      `Redis Cluster: Redirection detected. Re-configuring client to new master: ${nextUrl} (from ${previousUrl})`,
+    );
 
     if (redisClient.isOpen) {
       try {
         await redisClient.disconnect();
       } catch (err) {
-        logger.error("Redis Cluster: Error disconnecting from previous master", err);
+        logger.error(
+          "Redis Cluster: Error disconnecting from previous master",
+          err,
+        );
       }
       try {
         await redisClient.connect();
-        console.log(`Redis Cluster: Successfully reconnected to new master: ${nextUrl}`);
+        console.log(
+          `Redis Cluster: Successfully reconnected to new master: ${nextUrl}`,
+        );
       } catch (err) {
         logger.error("Redis Cluster: Failed to connect to new master", err);
       }
@@ -323,7 +333,9 @@ async function handleClusterRedirection(host: string, port: number): Promise<voi
 redisClient.on("error", (err) => {
   logger.error("Redis Client Error:", err);
   if (!isRedisClusterOffline) {
-    logger.warn("Redis cluster status: offline, falling back to local array caches.");
+    logger.warn(
+      "Redis cluster status: offline, falling back to local array caches.",
+    );
     isRedisClusterOffline = true;
   }
   if (SENTINEL_ENABLED && /READONLY/i.test(String(err?.message || ""))) {
@@ -394,8 +406,11 @@ const proxyHandler: ProxyHandler<typeof redisClient> = {
     if (prop === "get") {
       return async (...args: Parameters<typeof target.get>) => {
         if (isRedisClusterOffline) return getLocalCache(args[0] as string);
-        try { return await target.get(...args); }
-        catch (e) { return getLocalCache(args[0] as string); }
+        try {
+          return await target.get(...args);
+        } catch (e) {
+          return getLocalCache(args[0] as string);
+        }
       };
     }
     if (prop === "set") {
@@ -404,8 +419,9 @@ const proxyHandler: ProxyHandler<typeof redisClient> = {
           setLocalCache(args[0] as string, String(args[1]));
           return "OK";
         }
-        try { return await target.set(...args); }
-        catch (e) {
+        try {
+          return await target.set(...args);
+        } catch (e) {
           setLocalCache(args[0] as string, String(args[1]));
           return "OK";
         }
@@ -418,8 +434,9 @@ const proxyHandler: ProxyHandler<typeof redisClient> = {
           delLocalCache(key as string);
           return 1;
         }
-        try { return await target.del(...args); }
-        catch (e) {
+        try {
+          return await target.del(...args);
+        } catch (e) {
           const key = Array.isArray(args[0]) ? args[0][0] : args[0];
           delLocalCache(key as string);
           return 1;
@@ -427,7 +444,7 @@ const proxyHandler: ProxyHandler<typeof redisClient> = {
       };
     }
     return Reflect.get(target, prop, receiver);
-  }
+  },
 };
 
 const exportedRedisClient = new Proxy(redisClient, proxyHandler);

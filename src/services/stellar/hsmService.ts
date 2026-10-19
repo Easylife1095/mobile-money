@@ -5,7 +5,7 @@ import {
   GetPublicKeyCommand,
   SigningAlgorithmSpec,
 } from "@aws-sdk/client-kms";
-import { Transaction, Keypair, xdr, Networks } from "stellar-sdk";
+import { Transaction, Keypair, xdr, Networks } from "@stellar/stellar-sdk";
 import crypto from "crypto";
 import { getKmsClient } from "../../config/aws";
 

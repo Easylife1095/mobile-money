@@ -11,9 +11,9 @@ import {
   Transaction,
   TransactionBuilder,
   Horizon,
-} from "stellar-sdk";
+} from "@stellar/stellar-sdk";
 import { createSep10Router, Sep10Service, getSep10Config } from "../sep10";
-import { Networks } from "stellar-sdk";
+import { Networks } from "@stellar/stellar-sdk";
 import { errorHandler } from "../../middleware/errorHandler";
 import { z } from "zod";
 
@@ -168,10 +168,18 @@ function createChallengeTransaction(
   const expiresInSeconds = options?.expiresInSeconds || 900;
 
   const now = Math.floor(Date.now() / 1000);
-  const timebounds = {
-    minTime: String(now),
-    maxTime: String(now + expiresInSeconds),
-  };
+  // v16+ rejects inverted timebounds (minTime > maxTime) at build time, so
+  // "already expired" challenges use valid bounds whose maxTime is in the past.
+  const timebounds =
+    expiresInSeconds < 0
+      ? {
+          minTime: String(now - 60),
+          maxTime: String(now + expiresInSeconds),
+        }
+      : {
+          minTime: String(now),
+          maxTime: String(now + expiresInSeconds),
+        };
 
   const manageDataKey = `${homeDomain} auth`;
   const nonceLength = options?.wrongNonceLength ?? 64;
@@ -820,6 +828,92 @@ describe("SEP-10 Stellar Authentication", () => {
           masterPublicKey,
         );
         expect(response.token).toBeDefined();
+      });
+
+      it("should meet the medium threshold using Horizon signer weights", async () => {
+        const masterPublicKey = clientKeypair.publicKey();
+        const mockAccount = {
+          id: masterPublicKey,
+          account_id: masterPublicKey,
+          thresholds: {
+            low_threshold: 0,
+            med_threshold: 2,
+            high_threshold: 2,
+          },
+          signers: [
+            {
+              key: masterPublicKey,
+              type: "ed25519_public_key",
+              weight: 2,
+            },
+          ],
+        };
+        const mockServer = createMockHorizonServer(mockAccount);
+        const service = createTestServiceWithMockedServer(mockServer);
+
+        const challenge = await service.generateChallenge(masterPublicKey);
+        const tx = TransactionBuilder.fromXDR(
+          challenge.transaction,
+          TEST_NETWORK_PASSPHRASE,
+        ) as Transaction;
+        tx.sign(clientKeypair);
+
+        const response = await service.verifyChallenge(
+          tx.toXDR(),
+          masterPublicKey,
+        );
+        const decoded = service.verifyToken(response.token);
+        expect(decoded.sub).toBe(masterPublicKey);
+      });
+
+      it("should ignore a disabled master key when Horizon omits master_weight", async () => {
+        const masterPublicKey = clientKeypair.publicKey();
+        const mockAccount = {
+          id: masterPublicKey,
+          account_id: masterPublicKey,
+          thresholds: {
+            low_threshold: 0,
+            med_threshold: 1,
+            high_threshold: 1,
+          },
+          signers: [
+            {
+              key: masterPublicKey,
+              type: "ed25519_public_key",
+              weight: 0,
+            },
+            {
+              key: signer1Keypair.publicKey(),
+              type: "ed25519_public_key",
+              weight: 1,
+            },
+          ],
+        };
+        const mockServer = createMockHorizonServer(mockAccount);
+        const service = createTestServiceWithMockedServer(mockServer);
+
+        const challenge = await service.generateChallenge(masterPublicKey);
+        const masterOnly = TransactionBuilder.fromXDR(
+          challenge.transaction,
+          TEST_NETWORK_PASSPHRASE,
+        ) as Transaction;
+        masterOnly.sign(clientKeypair);
+
+        await expect(
+          service.verifyChallenge(masterOnly.toXDR(), masterPublicKey),
+        ).rejects.toThrow("Signing threshold not met");
+
+        const signerOnly = TransactionBuilder.fromXDR(
+          challenge.transaction,
+          TEST_NETWORK_PASSPHRASE,
+        ) as Transaction;
+        signerOnly.sign(signer1Keypair);
+
+        const response = await service.verifyChallenge(
+          signerOnly.toXDR(),
+          masterPublicKey,
+        );
+        expect(service.verifyToken(response.token).sub).toBe(masterPublicKey);
       });
 
       it("should handle accounts with zero threshold", async () => {

@@ -14,6 +14,21 @@ export const connection = {
 
 export const queueOptions: QueueOptions = {
   connection,
+  defaultJobOptions: {
+    attempts: 5,
+    backoff: {
+      type: "exponential",
+      delay: 2000, // Start with 2 seconds
+    },
+    removeOnComplete: {
+      age: 86400, // Keep completed jobs for 24 hours
+      count: 1000,
+    },
+    removeOnFail: {
+      age: 604800, // Keep failed jobs for 7 days
+      count: 5000,
+    },
+  },
 };
 
 // ---------------------------------------------------------------------------

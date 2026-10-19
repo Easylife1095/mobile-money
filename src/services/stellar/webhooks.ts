@@ -2,6 +2,8 @@ import logger from "../../utils/logger";
 import { Queue, Worker, Job } from "bullmq";
 import { createHmac } from "crypto";
 import { queueOptions } from "../../queue/config";
+import { signWebhookPayload } from "../../crypto/webhookSigning";
+import { validateWebhookUrl, SsrfBlockedError } from "../../security/ssrf";
 
 export const SEP_WEBHOOK_QUEUE_NAME = "sep-webhooks";
 
@@ -29,6 +31,19 @@ export async function enqueueSepWebhook(
   if (!callbackUrl) {
     console.warn(
       `[sep-webhook] Skipped enqueuing webhook for transaction ${transactionId}: No callback URL provided`,
+    );
+    return;
+  }
+
+  // The callback URL comes from the client's SEP request — reject unsafe
+  // destinations before a job (and its retries) is ever created.
+  try {
+    await validateWebhookUrl(callbackUrl);
+  } catch (err) {
+    console.warn(
+      `[sep-webhook] Skipped enqueuing webhook for transaction ${transactionId}: ${
+        err instanceof SsrfBlockedError ? err.message : String(err)
+      }`,
     );
     return;
   }
@@ -66,13 +81,27 @@ export const sepWebhookWorker = new Worker<SepWebhookJobData>(
     const secret = process.env.STELLAR_WEBHOOK_SECRET || "default_secret";
 
     const bodyStr = JSON.stringify(payload);
-    const signature =
-      "sha256=" + createHmac("sha256", secret).update(bodyStr).digest("hex");
+    const signature = signWebhookPayload(
+      bodyStr,
+      (p) => "sha256=" + createHmac("sha256", secret).update(p).digest("hex"),
+      process.env.STELLAR_WEBHOOK_ED25519_SIGNING_KEY,
+    ).signature;
 
     console.log(
       `[sep-webhook] Delivering webhook job=${job.id} for transaction=${transactionId} status=${status} to callbackUrl=${callbackUrl}`,
     );
     console.log(`[sep-webhook] Request Body: ${bodyStr}`);
+
+    try {
+      // Re-checked at request time — stored jobs outlive any policy change.
+      await validateWebhookUrl(callbackUrl);
+    } catch (error: any) {
+      logger.error(
+        `[sep-webhook] Blocked webhook for transaction=${transactionId} callbackUrl=${callbackUrl}:`,
+        error.message,
+      );
+      return; // permanent — do not retry a destination we refuse to call
+    }
 
     try {
       const response = await fetch(callbackUrl, {

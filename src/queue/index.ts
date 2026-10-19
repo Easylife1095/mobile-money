@@ -22,6 +22,11 @@ import {
   closeWebhookRetryWorker,
 } from "./webhookRetryWorker";
 import { closeRefundWorker, refundQueue, refundWorker } from "./refundWorker";
+import {
+  closeReceivingAnchorWebhookWorker,
+  startReceivingAnchorWebhookWorker,
+} from "./receivingAnchorWebhookWorker";
+import { closeReceivingAnchorWebhookQueue } from "../services/webhookService";
 
 export async function shutdownQueue(): Promise<void> {
   await Promise.all([
@@ -32,12 +37,16 @@ export async function shutdownQueue(): Promise<void> {
     syncQueue.close().catch(() => undefined),
     closeWebhookRetryWorker().catch(() => undefined),
     closeRefundWorker().catch(() => undefined),
+    closeReceivingAnchorWebhookWorker().catch(() => undefined),
+    closeReceivingAnchorWebhookQueue().catch(() => undefined),
   ]);
 }
 
 export {
   transactionQueue,
   addTransactionJob,
+  addTransactionToQueue,
+  calculateTransactionPriority,
   getJobById,
   getJobProgress,
   getQueueStats,
@@ -60,7 +69,7 @@ export type { SyncJobData, SyncJobResult } from "./syncQueue";
 
 export { transactionWorker, closeWorker };
 export { syncWorker, closeSyncWorker };
-export { createQueueDashboard } from "./dashboard";
+export { createQueueDashboard, createDashboardAuthMiddleware } from "./dashboard";
 export {
   getQueueHealth,
   pauseQueueEndpoint,
@@ -116,6 +125,10 @@ export {
 } from "./accountMergeWorker";
 
 export { startAccountingTokenRefreshWorker, closeAccountingTokenRefreshWorker };
+export {
+  startReceivingAnchorWebhookWorker,
+  closeReceivingAnchorWebhookWorker,
+} from "./receivingAnchorWebhookWorker";
 
 export {
   startWebhookRetryWorker,

@@ -3,15 +3,13 @@ import PDFDocument from "pdfkit";
 import { uploadToS3 } from "./s3Upload";
 import { Transaction } from "../models/transaction";
 import { AMLAlert, AMLHighValueAssessment } from "./aml";
+import { AES_GCM_ALGORITHM, encryptAesGcmToBuffer } from "../crypto/aesGcm";
 import { DB_ENCRYPTION_KEY } from "../config/env";
 
-const ALGORITHM = "aes-256-gcm";
-const IV_LENGTH = 12;
 const TEMPLATE_VERSION = "1.0";
 
 type ComplianceReportTemplate =
-  | "flagged_transaction"
-  | "high_value_transaction";
+  "flagged_transaction" | "high_value_transaction";
 
 export interface ComplianceReportResult {
   pdfUrl: string;
@@ -107,7 +105,9 @@ function formatTransactionAmount(transaction: Transaction): string {
     typeof transaction.currency === "string"
       ? transaction.currency.toUpperCase()
       : "USD";
-  const originalAmount = Number(transaction.originalAmount ?? transaction.amount);
+  const originalAmount = Number(
+    transaction.originalAmount ?? transaction.amount,
+  );
 
   if (Number.isFinite(originalAmount)) {
     return `${originalAmount} ${currency}`;
@@ -184,9 +184,7 @@ async function generatePDFBuffer(
       doc.text(
         `USD Equivalent: ${highValueAssessment.usdEquivalent.toFixed(2)} USD`,
       );
-      doc.text(
-        `Threshold: ${highValueAssessment.thresholdUsd.toFixed(2)} USD`,
-      );
+      doc.text(`Threshold: ${highValueAssessment.thresholdUsd.toFixed(2)} USD`);
       doc.text(
         `Source Amount: ${highValueAssessment.sourceAmount} ${highValueAssessment.originalCurrency}`,
       );
@@ -236,20 +234,26 @@ async function generatePDFBuffer(
     });
 
     doc.moveDown(2);
-    doc.fillColor("#999").fontSize(9).text(
-      `Generated at ${new Date().toLocaleString()} | Template ${TEMPLATE_VERSION}`,
-      { align: "center" },
-    );
+    doc
+      .fillColor("#999")
+      .fontSize(9)
+      .text(
+        `Generated at ${new Date().toLocaleString()} | Template ${TEMPLATE_VERSION}`,
+        { align: "center" },
+      );
 
     const pageRange = doc.bufferedPageRange();
     for (let i = pageRange.start; i < pageRange.start + pageRange.count; i++) {
       doc.switchToPage(i);
-      doc.fontSize(8).fillColor("#bdc3c7").text(
-        `CONFIDENTIAL - COMPLIANCE INTERNAL USE ONLY - Page ${i + 1} of ${pageRange.count}`,
-        50,
-        doc.page.height - 50,
-        { align: "center" },
-      );
+      doc
+        .fontSize(8)
+        .fillColor("#bdc3c7")
+        .text(
+          `CONFIDENTIAL - COMPLIANCE INTERNAL USE ONLY - Page ${i + 1} of ${pageRange.count}`,
+          50,
+          doc.page.height - 50,
+          { align: "center" },
+        );
     }
 
     doc.end();
@@ -257,18 +261,15 @@ async function generatePDFBuffer(
 }
 
 function encryptBuffer(buffer: Buffer): Buffer {
-  const iv = crypto.randomBytes(IV_LENGTH);
+  // Canonical binary layout [IV][AuthTag][EncryptedData] from src/crypto/aesGcm.ts.
+  // Key is scrypt-derived with the domain salt "compliance-report-salt" so
+  // previously stored reports remain decryptable.
   const secretKey = crypto.scryptSync(
     DB_ENCRYPTION_KEY,
     "compliance-report-salt",
     32,
   );
-  const cipher = crypto.createCipheriv(ALGORITHM, secretKey, iv);
-
-  const encrypted = Buffer.concat([cipher.update(buffer), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-
-  return Buffer.concat([iv, authTag, encrypted]);
+  return encryptAesGcmToBuffer(buffer, secretKey);
 }
 
 async function storeCompliancePdf(
@@ -279,9 +280,7 @@ async function storeCompliancePdf(
   template: ComplianceReportTemplate,
 ): Promise<{ pdfUrl: string; storageKey?: string }> {
   const filenamePrefix =
-    template === "high_value_transaction"
-      ? "HIGH_VALUE_TX"
-      : "COMPLIANCE_TX";
+    template === "high_value_transaction" ? "HIGH_VALUE_TX" : "COMPLIANCE_TX";
   const file = {
     buffer: encryptedBuffer,
     originalname: `${filenamePrefix}_${transactionId}_${alertId}_${Date.now()}.pdf.enc`,
@@ -307,7 +306,7 @@ async function storeCompliancePdf(
       transactionId,
       alertId,
       encrypted: "true",
-      algorithm: ALGORITHM,
+      algorithm: AES_GCM_ALGORITHM,
       templateVersion: TEMPLATE_VERSION,
     },
   });

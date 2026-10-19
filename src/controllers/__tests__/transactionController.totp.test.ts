@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, jest } from "@jest/globals";
 import { Request, Response } from "express";
-import * as StellarSdk from "stellar-sdk";
+import * as StellarSdk from "@stellar/stellar-sdk";
 
 // Mock heavy dependencies
 jest.mock("../../stellar/trustlines", () => ({
