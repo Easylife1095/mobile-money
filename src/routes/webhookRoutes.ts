@@ -4,6 +4,7 @@ import { validateWebhookSignature } from "../middleware/validateWebhookSignature
 import { ingestRateLimiter } from "../middleware/ingestRateLimit";
 import { validateRequest } from "../middleware/validation";
 import { validateSourceIp } from "../middleware/validateSourceIp";
+import { optionalIdempotency } from "../middleware/idempotency";
 import logger from "../utils/logger";
 
 const router = Router();
@@ -38,6 +39,7 @@ router.post(
   "/orange/callback",
   validateSourceIp("orange"),
   validateWebhookSignature("orange"),
+  optionalIdempotency,
   validateRequest(orangeCallbackSchema),
   async (req: Request, res: Response) => {
     logger.info(
@@ -56,6 +58,7 @@ router.post(
   "/orange/callback/batch",
   validateSourceIp("orange"),
   validateWebhookSignature("orange"),
+  optionalIdempotency,
   validateRequest(orangeBatchCallbackSchema),
   async (req: Request, res: Response) => {
     logger.info(
@@ -74,6 +77,7 @@ router.post(
   "/airtel/callback",
   validateSourceIp("airtel"),
   validateWebhookSignature("airtel"),
+  optionalIdempotency,
   async (req: Request, res: Response) => {
     logger.info(
       {
