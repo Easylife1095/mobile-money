@@ -486,6 +486,28 @@ export class TransactionModel {
     return mapTransactionRow(res.rows[0]);
   }
 
+  /**
+   * Fetch multiple transactions by ID in a single query, for callers
+   * reconciling a batch of transactions (e.g. `POST
+   * /transactions/batch-status`) without issuing one round trip per ID.
+   * IDs with no matching transaction are simply absent from the result —
+   * callers that need a per-ID outcome diff the input against the result.
+   */
+  async findByIds(ids: string[], userId?: string): Promise<Transaction[]> {
+    if (!ids.length) return [];
+
+    let q = `SELECT ${TRANSACTION_SELECT_COLUMNS} FROM transactions WHERE id = ANY($1)`;
+    const params: (string[] | string)[] = [ids];
+
+    if (userId) {
+      q += ` AND user_id=$2`;
+      params.push(userId);
+    }
+
+    const res = await queryRead<TransactionRow>(q, params);
+    return res.rows.map(mapTransactionRow).filter((t): t is Transaction => t !== null);
+  }
+
   async updateStatus(
     id: string,
     status: TransactionStatus,

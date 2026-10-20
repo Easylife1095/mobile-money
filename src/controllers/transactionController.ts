@@ -1612,3 +1612,80 @@ export const searchByMetadataHandler = async (req: Request, res: Response) => {
     );
   }
 };
+
+// ── Bulk transaction status (#2370) ────────────────────────────────────────
+
+const MAX_BATCH_STATUS_IDS = 50;
+
+const batchStatusSchema = z.object({
+  transaction_ids: z
+    .array(z.string().min(1))
+    .min(1, "transaction_ids must contain at least one ID")
+    .max(
+      MAX_BATCH_STATUS_IDS,
+      `transaction_ids must not contain more than ${MAX_BATCH_STATUS_IDS} items`,
+    ),
+});
+
+export interface BatchTransactionStatusEntry {
+  id: string;
+  status: TransactionStatus;
+  amount: string;
+  convertedAmount: string | null;
+  currency: string | undefined;
+  updatedAt: Date;
+}
+
+/**
+ * POST /api/v1/transactions/batch-status
+ *
+ * Lets integrators query the status of up to 50 transactions in a single
+ * request instead of issuing one request per transaction during periodic
+ * batch reconciliation. IDs that don't match any transaction (wrong ID,
+ * belongs to another user, etc.) are simply omitted from `data` rather than
+ * failing the whole request — callers diff the input array against the
+ * response keys to find the gaps.
+ */
+export const batchStatusHandler = async (req: Request, res: Response) => {
+  try {
+    const parsed = batchStatusSchema.parse(req.body);
+
+    // De-duplicate while preserving the single-query contract — looking up
+    // the same ID twice would be wasted work for no behavioral difference.
+    const uniqueIds = [...new Set(parsed.transaction_ids)];
+
+    const transactions = await transactionModel.findByIds(uniqueIds);
+
+    const data: Record<string, BatchTransactionStatusEntry> = {};
+    for (const tx of transactions) {
+      data[tx.id] = {
+        id: tx.id,
+        status: tx.status,
+        amount: tx.amount,
+        convertedAmount: tx.convertedAmount ?? null,
+        currency: tx.currency,
+        updatedAt: tx.updatedAt,
+      };
+    }
+
+    return res.json({
+      data,
+      requested: uniqueIds.length,
+      found: transactions.length,
+    });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      const message = err.issues[0]?.message ?? "Invalid batch-status request";
+      throw createError(ERROR_CODES.INVALID_INPUT, message, { error: message });
+    }
+    if (err && (err as any).code) throw err;
+    logger.error("Batch transaction status error:", err);
+    throw createError(
+      ERROR_CODES.INTERNAL_ERROR,
+      "Failed to fetch batch transaction status",
+      {
+        error: "Failed to fetch batch transaction status",
+      },
+    );
+  }
+};

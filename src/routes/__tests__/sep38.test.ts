@@ -37,17 +37,31 @@ jest.mock("../../config/redis", () => ({
 // Mock rateProvider
 // ---------------------------------------------------------------------------
 
+const MOCK_FEE = {
+  total: "0.0025000",
+  asset: "iso4217:XAF",
+  details: [
+    {
+      name: "percentage_fee",
+      amount: "0.0025000",
+      description: "0.50% conversion fee, in sell_asset units.",
+    },
+  ],
+};
+
 jest.mock("../../services/sep38/rateProvider", () => ({
   rateProvider: {
     getIndicativePrice: jest.fn(async () => ({
       price: "1.2345000",
       fee_percent: "0.50",
       fee_fixed: "0.0000000",
+      fee: MOCK_FEE,
     })),
     getFirmPrice: jest.fn(async () => ({
       price: "1.2345000",
       fee_percent: "0.50",
       fee_fixed: "0.0000000",
+      fee: MOCK_FEE,
     })),
   },
 }));
@@ -148,6 +162,25 @@ describe("GET /sep38/prices", () => {
     expect(typeof res.body.fee_fixed).toBe("string");
   });
 
+  it("includes a fee breakdown matching the SEP-38 fee object shape", async () => {
+    const res = await request(makeApp())
+      .get("/sep38/prices")
+      .query({ sell_asset: "iso4217:XAF", buy_asset: "stellar:USDC:G123" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.fee).toEqual({
+      total: "0.0025000",
+      asset: "iso4217:XAF",
+      details: [
+        {
+          name: "percentage_fee",
+          amount: "0.0025000",
+          description: "0.50% conversion fee, in sell_asset units.",
+        },
+      ],
+    });
+  });
+
   it("sets X-RateLimit-Limit header", async () => {
     const res = await request(makeApp())
       .get("/sep38/prices")
@@ -209,14 +242,12 @@ describe("POST /sep38/quote", () => {
   });
 
   it("books a firm quote with unique ID, ISO expires_at, and status pending_execution", async () => {
-    const res = await request(makeApp())
-      .post("/sep38/quote")
-      .send({
-        sell_asset: "iso4217:XAF",
-        buy_asset: "stellar:USDC:G123",
-        sell_amount: "1000",
-        ttl: 120,
-      });
+    const res = await request(makeApp()).post("/sep38/quote").send({
+      sell_asset: "iso4217:XAF",
+      buy_asset: "stellar:USDC:G123",
+      sell_amount: "1000",
+      ttl: 120,
+    });
 
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty("id");
@@ -234,6 +265,30 @@ describe("POST /sep38/quote", () => {
     expect(!isNaN(expiresAt.getTime())).toBe(true);
     expect(expiresAt.getTime()).toBeGreaterThan(Date.now());
   });
+
+  it("scales the fee breakdown by sell_amount (1000 units -> fee * 1000)", async () => {
+    const res = await request(makeApp()).post("/sep38/quote").send({
+      sell_asset: "iso4217:XAF",
+      buy_asset: "stellar:USDC:G123",
+      sell_amount: "1000",
+      ttl: 120,
+    });
+
+    expect(res.status).toBe(200);
+    // Mocked per-1-unit fee total is 0.0025000; for 1000 units that's 2.5.
+    expect(res.body.fee.total).toBe("2.5000000");
+    expect(res.body.fee.details[0].amount).toBe("2.5000000");
+    expect(res.body.fee.asset).toBe("iso4217:XAF");
+  });
+
+  it("returns the unscaled per-unit fee breakdown when no sell_amount is given", async () => {
+    const res = await request(makeApp())
+      .post("/sep38/quote")
+      .send({ sell_asset: "iso4217:XAF", buy_asset: "stellar:USDC:G123" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.fee.total).toBe("0.0025000");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -249,13 +304,11 @@ describe("GET /sep38/quote/:id", () => {
 
   it("retrieves an active booked quote by ID", async () => {
     const app = makeApp();
-    const createRes = await request(app)
-      .post("/sep38/quote")
-      .send({
-        sell_asset: "iso4217:XAF",
-        buy_asset: "stellar:USDC:G123",
-        sell_amount: "5000",
-      });
+    const createRes = await request(app).post("/sep38/quote").send({
+      sell_asset: "iso4217:XAF",
+      buy_asset: "stellar:USDC:G123",
+      sell_amount: "5000",
+    });
 
     expect(createRes.status).toBe(200);
     const quoteId = createRes.body.id;
@@ -272,21 +325,18 @@ describe("GET /sep38/quote/:id", () => {
   it("returns 410 when a quote has expired", async () => {
     const app = makeApp();
     // Create quote with 1-second TTL
-    const createRes = await request(app)
-      .post("/sep38/quote")
-      .send({
-        sell_asset: "iso4217:XAF",
-        buy_asset: "stellar:USDC:G123",
-        ttl: 1,
-      });
+    const createRes = await request(app).post("/sep38/quote").send({
+      sell_asset: "iso4217:XAF",
+      buy_asset: "stellar:USDC:G123",
+      ttl: 1,
+    });
 
     expect(createRes.status).toBe(200);
     const quoteId = createRes.body.id;
 
     // Simulate expiration by sweeping expired quotes with expireStaleQuotes
-    const { _getInMemoryQuote, expireStaleQuotes } = await import(
-      "../../services/sep38/quoteService"
-    );
+    const { _getInMemoryQuote, expireStaleQuotes } =
+      await import("../../services/sep38/quoteService");
     const { layeredCache } = await import("../../services/layeredCache");
     const quote = _getInMemoryQuote(quoteId);
     if (quote) {
@@ -304,7 +354,6 @@ describe("GET /sep38/quote/:id", () => {
     expect(getRes.body.error).toBe("Gone");
   });
 });
-
 
 // ---------------------------------------------------------------------------
 // Rate limiting — 429 enforcement

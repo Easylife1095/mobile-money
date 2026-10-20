@@ -160,6 +160,31 @@ function isUnrecoveredCircuitBreakerFailure(error: unknown): boolean {
   return isCircuitBreakerOpenError(originalError);
 }
 
+/**
+ * Environments in which the mock sandbox provider (#2274) is activated
+ * automatically, regardless of which real provider the caller requested.
+ * This lets integration tests and staging smoke tests exercise the full
+ * deposit/payout code path without needing live MTN/Orange/Airtel
+ * credentials, matching how `IS_SANDBOX=true` already auto-routes to
+ * `"mock"` in the compiled dispatcher (mobileMoneyService_impl.js) when the
+ * CALLER already passes `provider: "mock"` explicitly - this extends that
+ * same mock routing to also trigger automatically from NODE_ENV, without
+ * requiring every call site to know to pass "mock" itself.
+ */
+const MOCK_PROVIDER_ACTIVATION_ENVS = new Set(["test", "sandbox"]);
+
+/**
+ * Resolves the provider key actually used for a request. Returns `"mock"`
+ * when `NODE_ENV` is one of `MOCK_PROVIDER_ACTIVATION_ENVS`, otherwise
+ * returns the requested provider unchanged.
+ */
+function resolveSandboxProviderOverride(requestedProvider: string): string {
+  if (MOCK_PROVIDER_ACTIVATION_ENVS.has(process.env.NODE_ENV ?? "")) {
+    return "mock";
+  }
+  return requestedProvider;
+}
+
 class MobileMoneyService extends MobileMoneyServiceImpl {
   private async resolveProviderForMaintenance(provider: string) {
     const providerKey = provider.toLowerCase();
@@ -212,7 +237,9 @@ class MobileMoneyService extends MobileMoneyServiceImpl {
 
   async initiatePayment(provider: string, phoneNumber: string, amount: string) {
     assertSupportedPhoneNumberFormat(phoneNumber);
-    const routing = await this.resolveProviderForMaintenance(provider);
+    const routing = await this.resolveProviderForMaintenance(
+      resolveSandboxProviderOverride(provider),
+    );
 
     if (routing.maintenance?.action === "abort") {
       return {
@@ -248,7 +275,9 @@ class MobileMoneyService extends MobileMoneyServiceImpl {
 
   async sendPayout(provider: string, phoneNumber: string, amount: string) {
     assertSupportedPhoneNumberFormat(phoneNumber);
-    const routing = await this.resolveProviderForMaintenance(provider);
+    const routing = await this.resolveProviderForMaintenance(
+      resolveSandboxProviderOverride(provider),
+    );
 
     if (routing.maintenance?.action === "abort") {
       return {
@@ -283,7 +312,9 @@ class MobileMoneyService extends MobileMoneyServiceImpl {
       assertSupportedPhoneNumberFormat(item.phoneNumber);
     }
 
-    const routing = await this.resolveProviderForMaintenance(provider);
+    const routing = await this.resolveProviderForMaintenance(
+      resolveSandboxProviderOverride(provider),
+    );
 
     if (routing.maintenance?.action === "abort") {
       return {
@@ -330,4 +361,4 @@ class MobileMoneyService extends MobileMoneyServiceImpl {
   }
 }
 
-export { MobileMoneyService };
+export { MobileMoneyService, resolveSandboxProviderOverride };

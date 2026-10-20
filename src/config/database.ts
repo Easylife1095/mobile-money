@@ -681,13 +681,21 @@ export async function getPoolClient() {
 
 /**
  * Read replica connection pool – handles SELECT queries to take load off the
- * primary. If READ_REPLICA_URL is not configured, falls back to the primary.
+ * primary (e.g. GET /api/v1/reports/* and dashboard analytics, #2378). Falls
+ * back to the primary when no replica is configured or reachable.
  *
- * Multiple replica URLs can be provided as a comma-separated list in
- * READ_REPLICA_URL. The pool load-balances across all replicas via round-robin.
+ * Multiple replica URLs can be provided as a comma-separated list in either
+ * DATABASE_READ_URL (preferred name, #2378) or the legacy READ_REPLICA_URL.
+ * DATABASE_READ_URL takes precedence when both are set. The pool
+ * load-balances across all replicas via round-robin.
  */
-const replicaUrls: string[] = process.env.READ_REPLICA_URL
-  ? process.env.READ_REPLICA_URL.split(",").map((url) => url.trim())
+const replicaUrls: string[] = (
+  process.env.DATABASE_READ_URL || process.env.READ_REPLICA_URL
+)
+  ? (process.env.DATABASE_READ_URL || process.env.READ_REPLICA_URL || "")
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean)
   : [];
 
 const REPLICA_SYNC_LAG_THRESHOLD_SECONDS = (() => {
@@ -913,12 +921,49 @@ if (process.env.NODE_ENV !== "test") {
 export async function queryRead<T extends import("pg").QueryResultRow = any>(
   text: string,
   params?: unknown[],
+  signal?: AbortSignal,
 ): Promise<import("pg").QueryResult<T>> {
-  const replicaResult = await queryReplica([text, params]);
-  if (replicaResult) return replicaResult;
+  const query = async (): Promise<import("pg").QueryResult<T>> => {
+    const replicaResult = await queryReplica([text, params]);
+    if (replicaResult) return replicaResult;
 
-  // Fall back: use primary pool (which goes through PgBouncer)
-  return runQuery([text, params], false);
+    // Fall back: use primary pool (which goes through PgBouncer)
+    return runQuery([text, params], false);
+  };
+
+  return signal ? raceWithAbortSignal(query(), signal) : query();
+}
+
+/**
+ * Races `promise` against `signal` aborting. Does not cancel the underlying
+ * work server-side (the `pg` pool has no cheap way to do that mid-flight);
+ * this exists so a caller — most importantly `requestTimeout` middleware —
+ * stops waiting on the query the instant the request's deadline passes,
+ * rather than discovering the abort only after the query eventually
+ * resolves on its own.
+ */
+function raceWithAbortSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(new Error("Query aborted before it started"));
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error("Query aborted: request timed out"));
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    promise
+      .then((result) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      })
+      .catch((err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      });
+  });
 }
 
 /**
@@ -946,10 +991,12 @@ export async function queryTransactionLogRead<T extends import("pg").QueryResult
 export async function queryWrite<T extends import("pg").QueryResultRow = any>(
   text: string,
   params?: unknown[],
+  signal?: AbortSignal,
 ): Promise<import("pg").QueryResult<T>> {
   // Explicitly primary: bypasses GET-request replica routing, so callers can
   // use it for reads that must see the latest committed data.
-  return runQuery([text, params], false);
+  const query = () => runQuery([text, params], false);
+  return signal ? raceWithAbortSignal(query(), signal) : query();
 }
 
 export interface ReplicaPoolStatus {
@@ -1022,20 +1069,37 @@ export async function getPgBouncerStats(): Promise<{
         "postgresql://user:password@localhost:6432/pgbouncer",
     });
 
-    const result = await pgbouncerPool.query(
-      "SELECT sum(cl_active) as active, sum(cl_idle) as idle, sum(sv_active) as sv_active, sum(sv_idle) as sv_idle FROM pgbouncer.client_lookup;",
-    );
+    // PgBouncer's admin console only understands its own SHOW commands, not
+    // arbitrary SQL (there is no queryable `pgbouncer.client_lookup` table —
+    // querying it fails with "invalid command ... use SHOW HELP"). SHOW
+    // CLIENTS lists every client-facing connection (state: active/idle);
+    // SHOW SERVERS lists every connection PgBouncer holds to the real
+    // Postgres server on the other side of the pool.
+    const [clients, servers] = await Promise.all([
+      pgbouncerPool.query("SHOW CLIENTS;"),
+      pgbouncerPool.query("SHOW SERVERS;"),
+    ]);
 
     await pgbouncerPool.end();
 
-    const row = result.rows[0] || {};
+    const clientActive = clients.rows.filter(
+      (r: { state?: string }) => r.state === "active",
+    ).length;
+    const clientIdle = clients.rows.filter(
+      (r: { state?: string }) => r.state === "idle",
+    ).length;
+    const serverActive = servers.rows.filter(
+      (r: { state?: string }) => r.state === "active",
+    ).length;
+    const serverIdle = servers.rows.filter(
+      (r: { state?: string }) => r.state === "idle",
+    ).length;
+
     return {
-      activeConnections: parseInt(row.sv_active || 0),
-      idleConnections: parseInt(row.sv_idle || 0),
-      totalConnections:
-        parseInt(row.sv_active || 0) + parseInt(row.sv_idle || 0),
-      clientConnections:
-        parseInt(row.cl_active || 0) + parseInt(row.cl_idle || 0),
+      activeConnections: serverActive,
+      idleConnections: serverIdle,
+      totalConnections: serverActive + serverIdle,
+      clientConnections: clientActive + clientIdle,
     };
   } catch (err) {
     console.warn("Failed to get PgBouncer stats:", err);

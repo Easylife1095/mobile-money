@@ -13,6 +13,7 @@ import axios from "axios";
 import { randomUUID } from "crypto";
 import { BaseProvider, ProviderAuthConfig } from "../../providers/baseProvider";
 import { MomoAuthManager } from "../../../providers/mtn/momoAuth";
+import type { BatchPayoutItem, BatchPayoutResult } from "../mobileMoneyService";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -90,19 +91,6 @@ function buildConfig(): ProviderAuthConfig & {
 }
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
-
-export interface BatchPayoutItem {
-  referenceId: string;
-  phoneNumber: string;
-  amount: string;
-}
-
-export interface BatchPayoutResult {
-  referenceId: string;
-  success: boolean;
-  error?: string;
-  providerReference?: string;
-}
 
 export class MTNProvider extends BaseProvider {
   protected readonly subscriptionKey: string;
