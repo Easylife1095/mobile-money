@@ -63,6 +63,8 @@ import adminControllerRouter, {
   getDeadLetterJobByIdHandler,
   replayDeadLetterJobHandler,
 } from "../controllers/adminController";
+import { deadLetterQueue } from "../queue/dlq";
+import { replayDlqJob } from "../queue/dlqWorker";
 
 const router = Router();
 router.use("/monitoring", adminControllerRouter);
@@ -73,6 +75,77 @@ router.get("/dlq/jobs", getDeadLetterJobsHandler);
 router.get("/dlq/jobs/:id", getDeadLetterJobByIdHandler);
 router.get("/dlq/:id", getDeadLetterJobByIdHandler);
 router.post("/dlq/replay/:id", replayDeadLetterJobHandler);
+
+// ─── Queues: bulk DLQ replay endpoint ──────────────────────────────────────
+/**
+ * POST /api/admin/queues/replay
+ *
+ * Safely retries failed jobs from the dead-letter queue.
+ *
+ * Body params (all optional):
+ *   jobIds       string[]  – specific DLQ job IDs to replay (max 100)
+ *   errorCodes   string[]  – only replay jobs whose failedReason contains
+ *                             one of these substrings (case-insensitive)
+ *   limit        number    – max jobs to replay when jobIds is omitted (default 10)
+ */
+router.post(
+  "/queues/replay",
+  async (req: Request, res: Response) => {
+    try {
+      const { jobIds, errorCodes, limit: rawLimit } = req.body ?? {};
+      const limit = Math.min(Number(rawLimit ?? 10), 100);
+
+      let jobs = await deadLetterQueue.getJobs(["waiting"], 0, 9999);
+
+      // Filter by explicit job IDs when supplied
+      if (Array.isArray(jobIds) && jobIds.length > 0) {
+        const idSet = new Set(jobIds.map(String));
+        jobs = jobs.filter((j) => j.id !== undefined && idSet.has(String(j.id)));
+      }
+
+      // Filter by error codes when supplied
+      if (Array.isArray(errorCodes) && errorCodes.length > 0) {
+        const codes = errorCodes.map((c: string) => String(c).toLowerCase());
+        jobs = jobs.filter((j) => {
+          const reason = String(
+            j.data?.failedReason ?? j.failedReason ?? "",
+          ).toLowerCase();
+          return codes.some((code) => reason.includes(code));
+        });
+      }
+
+      const candidates = jobs.slice(0, limit);
+      const results: Array<{ jobId: string | undefined; replayed: boolean }> = [];
+
+      for (const job of candidates) {
+        const replayed = await replayDlqJob(job);
+        results.push({ jobId: job.id, replayed });
+      }
+
+      const replayed = results.filter((r) => r.replayed).length;
+      const skipped = results.length - replayed;
+
+      logger.info(
+        { replayed, skipped, totalCandidates: candidates.length },
+        "[admin] DLQ bulk replay completed",
+      );
+
+      return res.json({
+        success: true,
+        replayed,
+        skipped,
+        total: results.length,
+        results,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ err }, "[admin] DLQ bulk replay failed");
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to replay DLQ jobs", {
+        details: msg,
+      });
+    }
+  },
+);
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
 const IMPERSONATION_TOKEN_TTL_MS = 15 * 60 * 1000;
 const READ_ONLY_IMPERSONATION_MESSAGE = "Read-only mode active";

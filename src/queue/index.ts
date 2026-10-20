@@ -83,6 +83,7 @@ export {
 
 export { queueOptions } from "./config";
 export { deadLetterQueue, DLQ_NAME, capturePersistentFailure } from "./dlq";
+export { startDlqMonitor, stopDlqMonitor, replayDlqJob } from "./dlqWorker";
 export { startProviderBalanceAlertWorker, scheduleProviderBalanceAlertJob };
 
 // Accounting Retry Queue Exports
