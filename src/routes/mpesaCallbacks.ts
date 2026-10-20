@@ -30,14 +30,16 @@ import { MpesaProvider } from "../services/providers/mpesaService";
 import { mpesaStkQueryWorker } from "../workers/mpesaStkQueryWorker";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 
-import { mpesaSignatureValidator } from "../middleware/mpesaSignatureValidator";
+import { verifyMpesaCallbackRequest } from "../providers/mpesa/callbackVerification";
 
 const router = Router();
 const mpesaProvider = new MpesaProvider();
 const transactionModel = new TransactionModel();
 
 router.use(ingestRateLimiter);
-router.use(mpesaSignatureValidator);
+// Verify the X.509/RSA signature, timestamp freshness, and initiator password
+// before any callback body is parsed into ledger side effects.
+router.use(verifyMpesaCallbackRequest);
 
 router.post("/stk/callback", (req: Request, res: Response) => {
   try {
