@@ -6,6 +6,7 @@
  *
  * Commands:
  *   retry-batch <batch_id>  - re-queue failed or stuck transactions belonging to a batch
+ *   provider:health         - inspect status, liquidity and latency of every provider
  */
 
 import dotenv from "dotenv";
@@ -13,6 +14,7 @@ import os from "os";
 import {
   CLI_ERROR_CODES,
   formatCliHeading,
+  formatTable,
   printError,
   printSuccess,
   printWarning,
@@ -71,6 +73,100 @@ process.stderr.write = function (
   return originalStderrWrite(chunk, encodingOrCb, cb);
 };
 
+// Providers whose outage makes `provider:health` exit non-zero. Override with
+// a comma-separated MOMO_PRIMARY_PROVIDERS list (e.g. "mtn,airtel,orange").
+const DEFAULT_PRIMARY_PROVIDERS = ["mtn", "airtel"];
+
+export interface ProviderHealthRow {
+  provider: string;
+  status: "UP" | "DOWN";
+  balance: string;
+  latency: string;
+}
+
+export function getPrimaryProviders(): string[] {
+  const configured = process.env.MOMO_PRIMARY_PROVIDERS?.split(",")
+    .map((name) => name.trim().toLowerCase())
+    .filter(Boolean);
+  return configured && configured.length > 0
+    ? configured
+    : DEFAULT_PRIMARY_PROVIDERS;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timed out")), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Float balance for providers that expose one; "N/A" when it is unavailable. */
+async function fetchProviderBalance(
+  provider: string,
+  timeoutMs: number,
+): Promise<string> {
+  try {
+    let result: {
+      success: boolean;
+      data?: { availableBalance?: number; currency?: string };
+    };
+
+    if (provider === "mtn") {
+      const { MTNProvider } =
+        require("../services/mobilemoney/providers/mtn.js") as typeof import("../services/mobilemoney/providers/mtn");
+      result = await withTimeout(
+        new MTNProvider().getOperationalBalance(),
+        timeoutMs,
+      );
+    } else if (provider === "airtel") {
+      const { AirtelService } =
+        require("../services/mobilemoney/providers/airtel.js") as typeof import("../services/mobilemoney/providers/airtel");
+      result = await withTimeout(
+        new AirtelService().getOperationalBalance() as Promise<typeof result>,
+        timeoutMs,
+      );
+    } else {
+      return "N/A";
+    }
+
+    const available = result.data?.availableBalance;
+    if (!result.success || typeof available !== "number") {
+      return "N/A";
+    }
+    return `${available.toLocaleString("en-US", { maximumFractionDigits: 2 })} ${result.data?.currency ?? ""}`.trim();
+  } catch {
+    return "N/A";
+  }
+}
+
+/** Queries every registered provider in parallel for status, balance and latency. */
+export async function collectProviderHealth(): Promise<ProviderHealthRow[]> {
+  const { DEFAULT_PROVIDERS, pingProvider } =
+    require("../services/mobilemoney/providers/healthCheck.js") as typeof import("../services/mobilemoney/providers/healthCheck");
+
+  return Promise.all(
+    DEFAULT_PROVIDERS.map(async (config): Promise<ProviderHealthRow> => {
+      const health = await pingProvider(config);
+      const balance =
+        health.status === "up"
+          ? await fetchProviderBalance(config.name, config.timeoutMs)
+          : "N/A";
+      return {
+        provider: config.name,
+        status: health.status === "up" ? "UP" : "DOWN",
+        balance,
+        latency:
+          health.responseTime === null ? "-" : `${health.responseTime} ms`,
+      };
+    }),
+  );
+}
+
 type ActivePool = { end: () => Promise<void> };
 type ActiveQueue = { close: () => Promise<void> };
 
@@ -89,6 +185,8 @@ Commands:
   retry-batch <batch_id>   Retry all failed or stuck transactions for a specific batch ID (UUID).
   verify-report <report> <signature> [public-key-file]  Verify a signed settlement report.
   dashboard                Render an active terminal overview of node CPU, memory, and queue lengths.
+  provider:health          Show status, balance and latency for every mobile money provider.
+                           Exits non-zero if a primary provider is DOWN (MOMO_PRIMARY_PROVIDERS, default: mtn,airtel).
 
 Options:
   --help, -h             Show this help information.
@@ -147,6 +245,52 @@ export async function runCli(args: string[]): Promise<void> {
       process.exitCode = 0;
     } catch (error) {
       printError("Unable to verify report", error);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (command === "provider:health") {
+    try {
+      const rows = await collectProviderHealth();
+
+      console.log(`${formatCliHeading("Mobile Money Provider Health")}\n`);
+      console.log(
+        formatTable(
+          ["Provider", "Status", "Balance", "Latency"],
+          rows.map((row) => [
+            row.provider,
+            row.status,
+            row.balance,
+            row.latency,
+          ]),
+        ),
+      );
+
+      const primary = getPrimaryProviders();
+      console.log(`\nPrimary providers: ${primary.join(", ")}`);
+
+      const downPrimary = rows
+        .filter(
+          (row) => row.status === "DOWN" && primary.includes(row.provider),
+        )
+        .map((row) => row.provider);
+      if (downPrimary.length > 0) {
+        printError(
+          `Primary provider(s) DOWN: ${downPrimary.join(", ")}`,
+          undefined,
+          CLI_ERROR_CODES.ProviderDown,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      printSuccess("All primary providers are UP.");
+    } catch (err) {
+      printError(
+        "Unable to check provider health",
+        err,
+        CLI_ERROR_CODES.ExecutionFailed,
+      );
       process.exitCode = 1;
     }
     return;
@@ -353,7 +497,10 @@ if (require.main === module) {
       await activePool?.end().catch(() => undefined);
       if (process.argv[2] === "retry-batch") {
         await activeTransactionQueue?.close().catch(() => undefined);
-      } else if (process.argv[2] === "dashboard") {
+      } else if (
+        process.argv[2] === "dashboard" ||
+        process.argv[2] === "provider:health"
+      ) {
         process.exit(process.exitCode || 0);
       }
     }
