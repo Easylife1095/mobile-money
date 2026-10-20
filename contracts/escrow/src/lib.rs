@@ -2,7 +2,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, token, Address, BytesN,
+    Env, Vec,
 };
 
 mod storage;
@@ -46,6 +47,16 @@ pub enum EscrowError {
 
 // ── State ────────────────────────────────────────────────────────────────────
 
+/// Lifecycle state of the escrow. `Pending` is the only state in which funds
+/// can move; `Completed` and `Refunded` are terminal.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EscrowStatus {
+    Pending,
+    Completed,
+    Refunded,
+}
+
 /// Persistent on-chain state for a single escrow instance — the *hot* half.
 ///
 /// Only the fields that a fund-moving entry point needs are stored under this
@@ -70,7 +81,7 @@ pub struct EscrowState {
     pub lock_until_ledger: u32,
     pub fee_bps: u32,
     pub fee_recipient: Address,
-    pub released: bool,
+    pub status: EscrowStatus,
 }
 
 impl EscrowState {
@@ -93,6 +104,16 @@ pub struct EscrowAdmins {
     pub admin_signers: Vec<Address>,
     /// Minimum number of admin signatures required to perform an upgrade.
     pub required_admin_signatures: u32,
+}
+
+#[contractevent(topics = ["escrow", "released"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowReleased {
+    #[topic]
+    pub beneficiary: Address,
+    pub release_timestamp: u64,
+    pub net_amount: i128,
+    pub fee_amount: i128,
 }
 
 /// Shape of the `ESCROW` entry before the admin signer list was split out.
@@ -150,7 +171,11 @@ fn load_state(env: &Env) -> Option<EscrowState> {
         lock_until_ledger: legacy.lock_until_ledger,
         fee_bps: legacy.fee_bps,
         fee_recipient: legacy.fee_recipient,
-        released: legacy.released,
+        status: if legacy.released {
+            EscrowStatus::Completed
+        } else {
+            EscrowStatus::Pending
+        },
     };
     env.storage().instance().set(&ESCROW, &state);
     Some(state)
@@ -281,7 +306,7 @@ impl EscrowContract {
                 lock_until_ledger,
                 fee_bps,
                 fee_recipient,
-                released: false,
+                status: EscrowStatus::Pending,
             },
         );
         env.storage().instance().set(
@@ -356,7 +381,7 @@ impl EscrowContract {
 
         state.arbiter.require_auth();
 
-        if state.released {
+        if state.status != EscrowStatus::Pending {
             return Err(EscrowError::AlreadyReleased);
         }
         // Arbiter cannot release after the lock has expired.
@@ -366,9 +391,10 @@ impl EscrowContract {
 
         let (fee, net) = state.split().ok_or(EscrowError::InvalidAmount)?;
 
-        // Effects — close the escrow *before* any token interaction so a
-        // callback from the token can never observe or re-spend a live escrow.
-        state.released = true;
+        // Effects — mark the escrow Completed *before* any token interaction
+        // so a callback from the token can never observe or re-spend a live
+        // escrow.
+        state.status = EscrowStatus::Completed;
         env.storage().instance().set(&ESCROW, &state);
 
         // Interactions
@@ -381,6 +407,14 @@ impl EscrowContract {
             tc.transfer(&contract_addr, &state.fee_recipient, &fee);
         }
         tc.transfer(&contract_addr, &state.beneficiary, &net);
+
+        EscrowReleased {
+            beneficiary: state.beneficiary,
+            release_timestamp: env.ledger().timestamp(),
+            net_amount: net,
+            fee_amount: fee,
+        }
+        .publish(&env);
 
         Ok(())
     }
@@ -396,7 +430,7 @@ impl EscrowContract {
 
         state.arbiter.require_auth();
 
-        if state.released {
+        if state.status != EscrowStatus::Pending {
             return Err(EscrowError::AlreadyReleased);
         }
         if state.lock_until_ledger > 0 && env.ledger().sequence() > state.lock_until_ledger {
@@ -404,7 +438,7 @@ impl EscrowContract {
         }
 
         // Effects — close the escrow before the transfer below.
-        state.released = true;
+        state.status = EscrowStatus::Refunded;
         env.storage().instance().set(&ESCROW, &state);
 
         // Interaction
@@ -425,14 +459,14 @@ impl EscrowContract {
         let mut state: EscrowState = load_state(&env).expect("not initialised");
 
         state.depositor.require_auth();
-        assert!(!state.released, "already released");
+        assert!(state.status == EscrowStatus::Pending, "already released");
         assert!(
             env.ledger().timestamp() >= state.emergency_unlock_timestamp,
             "emergency unlock not yet available"
         );
 
         // Effects — close the escrow before the transfer below.
-        state.released = true;
+        state.status = EscrowStatus::Refunded;
         env.storage().instance().set(&ESCROW, &state);
 
         // Interaction
@@ -454,7 +488,7 @@ impl EscrowContract {
 
         state.depositor.require_auth();
 
-        if state.released {
+        if state.status != EscrowStatus::Pending {
             return Err(EscrowError::AlreadyReleased);
         }
         // Time-lock must have passed.
@@ -463,7 +497,7 @@ impl EscrowContract {
         }
 
         // Effects — close the escrow before the transfer below.
-        state.released = true;
+        state.status = EscrowStatus::Refunded;
         env.storage().instance().set(&ESCROW, &state);
 
         // Interaction
@@ -516,9 +550,9 @@ mod tests {
     extern crate std;
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
+        testutils::{Address as _, Events as _, Ledger, MockAuth, MockAuthInvoke},
         token::{Client as TokenClient, StellarAssetClient},
-        Address, Bytes, Env, IntoVal,
+        Address, Bytes, Env, Event, IntoVal,
     };
 
     const MINT_AMOUNT: i128 = 1_000_000;
@@ -665,7 +699,7 @@ mod tests {
         let state = client.get_state();
         assert_eq!(state.amount, amount);
         assert_eq!(state.emergency_unlock_timestamp, emergency_unlock_timestamp);
-        assert!(!state.released);
+        assert_eq!(state.status, EscrowStatus::Pending);
 
         // Depositor's balance should decrease by `amount`.
         let tc = TokenClient::new(&env, &token);
@@ -701,7 +735,76 @@ mod tests {
         assert_eq!(tc.balance(&fee_recipient), expected_fee);
 
         let state = client.get_state();
-        assert!(state.released);
+        assert_eq!(state.status, EscrowStatus::Completed);
+    }
+
+    #[test]
+    fn test_release_emits_escrow_released_event() {
+        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
+        let amount: i128 = 500_000;
+        let fee_bps: u32 = 250;
+
+        init(
+            &client,
+            &depositor,
+            &beneficiary,
+            &arbiter,
+            &token,
+            amount,
+            100,
+            fee_bps,
+            &fee_recipient,
+        );
+
+        env.ledger().set_timestamp(1_234);
+        client.release();
+
+        let expected_fee = amount * fee_bps as i128 / 10_000;
+        let expected = EscrowReleased {
+            beneficiary: beneficiary.clone(),
+            release_timestamp: 1_234,
+            net_amount: amount - expected_fee,
+            fee_amount: expected_fee,
+        };
+        assert_eq!(
+            env.events().all().filter_by_contract(&client.address),
+            [expected.to_xdr(&env, &client.address)]
+        );
+    }
+
+    #[test]
+    fn test_failed_release_transfer_reverts_state_and_balances() {
+        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
+        let amount: i128 = 500_000;
+
+        init(
+            &client,
+            &depositor,
+            &beneficiary,
+            &arbiter,
+            &token,
+            amount,
+            100,
+            250,
+            &fee_recipient,
+        );
+
+        let token_client = TokenClient::new(&env, &token);
+
+        // Drain the escrow so the token transfer in `release` fails after the
+        // state has already been written to Completed.
+        token_client.transfer(&client.address, &depositor, &amount);
+        assert_eq!(token_client.balance(&client.address), 0);
+
+        assert!(client.try_release().is_err());
+
+        // The failed invocation must roll the state and balances back.
+        let state = client.get_state();
+        assert_eq!(state.status, EscrowStatus::Pending);
+        assert_eq!(token_client.balance(&client.address), 0);
+        assert_eq!(token_client.balance(&beneficiary), 0);
+        assert_eq!(token_client.balance(&fee_recipient), 0);
+        assert!(!client.reentrancy_guard_active());
     }
 
     #[test]
@@ -754,7 +857,7 @@ mod tests {
         client.refund();
 
         let state = client.get_state();
-        assert!(state.released);
+        assert_eq!(state.status, EscrowStatus::Refunded);
     }
 
     #[test]
@@ -786,7 +889,7 @@ mod tests {
 
         let token_client = TokenClient::new(&env, &token);
         assert_eq!(token_client.balance(&depositor), MINT_AMOUNT);
-        assert!(client.get_state().released);
+        assert_eq!(client.get_state().status, EscrowStatus::Refunded);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -862,7 +965,7 @@ mod tests {
         assert!(release_result.is_ok());
 
         let state = client.get_state();
-        assert!(state.released);
+        assert_eq!(state.status, EscrowStatus::Completed);
 
         let token_client = TokenClient::new(&env, &token);
         let expected_fee = amount * fee_bps as i128 / 10_000;
@@ -944,7 +1047,7 @@ mod tests {
         let token_client = TokenClient::new(&env, &token);
         assert_eq!(token_client.balance(&beneficiary), amount);
         assert_eq!(token_client.balance(&fee_recipient), 0);
-        assert!(client.get_state().released);
+        assert_eq!(client.get_state().status, EscrowStatus::Completed);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1137,7 +1240,7 @@ mod tests {
         // The hot entry carries only what the fund-moving paths need…
         let state = client.get_state();
         assert_eq!(state.amount, amount);
-        assert!(!state.released);
+        assert_eq!(state.status, EscrowStatus::Pending);
 
         // …and the cold entry keeps the upgrade material.
         let admins = client.get_admins();
@@ -1256,7 +1359,7 @@ mod tests {
         assert!(client.try_self_refund().is_err());
 
         // Nothing moved while the lock was held.
-        assert!(!client.get_state().released);
+        assert_eq!(client.get_state().status, EscrowStatus::Pending);
         assert_eq!(token_client.balance(&client.address), amount);
         assert_eq!(token_client.balance(&beneficiary), 0);
 
@@ -1267,7 +1370,7 @@ mod tests {
         assert!(!client.reentrancy_guard_active());
 
         client.release();
-        assert!(client.get_state().released);
+        assert_eq!(client.get_state().status, EscrowStatus::Completed);
         assert_eq!(token_client.balance(&beneficiary), amount);
         assert_eq!(token_client.balance(&client.address), 0);
         assert!(!client.reentrancy_guard_active());
@@ -1304,7 +1407,7 @@ mod tests {
 
         // The next call sees a free lock.
         client.release();
-        assert!(client.get_state().released);
+        assert_eq!(client.get_state().status, EscrowStatus::Completed);
         assert!(!client.reentrancy_guard_active());
     }
 }

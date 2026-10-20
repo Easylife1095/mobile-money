@@ -306,10 +306,14 @@
                           },
                           {
                             "key": {
-                              "symbol": "released"
+                              "symbol": "status"
                             },
                             "val": {
-                              "bool": false
+                              "vec": [
+                                {
+                                  "symbol": "Pending"
+                                }
+                              ]
                             }
                           },
                           {

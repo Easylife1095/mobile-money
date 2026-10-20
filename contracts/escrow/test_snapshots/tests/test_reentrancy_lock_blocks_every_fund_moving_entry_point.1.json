@@ -347,10 +347,14 @@
                           },
                           {
                             "key": {
-                              "symbol": "released"
+                              "symbol": "status"
                             },
                             "val": {
-                              "bool": true
+                              "vec": [
+                                {
+                                  "symbol": "Completed"
+                                }
+                              ]
                             }
                           },
                           {
