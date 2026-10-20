@@ -1,6 +1,11 @@
 import logger from "../utils/logger";
 import { NextFunction, Request, Response } from "express";
 import { z } from "zod";
+import {
+  encodeCursor,
+  decodeCursor,
+  buildPaginationMeta,
+} from "../utils/pagination.js";
 import { StellarService } from "../services/stellar/stellarService";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { maskPhoneNumber } from "../utils/masking";
@@ -212,46 +217,63 @@ export const getTransactionHistoryHandler = async (
     };
 
     // Database Queries
-    // If using cursor-based pagination, fetch limit+1 items to determine `hasMore`.
+    // Cursor-based pagination takes priority when `before` or `after` is present.
+    // Falls back to offset-based for legacy clients that omit cursor params.
     let transactions = [] as any[];
     let total: number | undefined;
 
     if (before || after) {
+      // Validate and decode the cursor so the model receives typed values.
+      let cursorOptions: { before?: string; after?: string } = {};
+      try {
+        if (after) {
+          decodeCursor(after as string); // validate — throws on malformed input
+          cursorOptions = { after: after as string };
+        } else if (before) {
+          decodeCursor(before as string);
+          cursorOptions = { before: before as string };
+        }
+      } catch (cursorErr: any) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "Invalid pagination cursor",
+          { error: cursorErr.message },
+        );
+      }
+
+      const direction: "forward" | "backward" = before ? "backward" : "forward";
+
+      // Fetch limit+1 rows so we can detect whether another page exists.
       const rows = await transactionModel.list(
         limitNum + 1,
-        offsetNum,
+        0, // offset is unused with cursor pagination
         startDate as string | undefined,
         endDate as string | undefined,
         filters,
-        {
-          before: before as string | undefined,
-          after: after as string | undefined,
-        },
+        cursorOptions,
       );
 
-      // If 'before' was used we fetched ascending results; reverse to keep newest-first
-      if (before) {
-        rows.reverse();
-      }
+      // buildPaginationMeta trims the sentinel row and reverses for backward pages.
+      const hasPrevPage = Boolean(after); // if we used `after`, a prev page exists
+      const paginationMeta = buildPaginationMeta(
+        rows,
+        limitNum,
+        direction,
+        hasPrevPage,
+      );
 
-      const hasMore = rows.length > limitNum;
       transactions = rows.slice(0, limitNum);
+      if (direction === "backward") transactions.reverse();
 
       return res.json({
         data: transactions,
         pagination: {
           limit: limitNum,
-          before: transactions.length
-            ? Buffer.from(
-                `${transactions[0].createdAt.toISOString()}|${transactions[0].id}`,
-              ).toString("base64")
-            : null,
-          after: transactions.length
-            ? Buffer.from(
-                `${transactions[transactions.length - 1].createdAt.toISOString()}|${transactions[transactions.length - 1].id}`,
-              ).toString("base64")
-            : null,
-          hasMore,
+          next_cursor: paginationMeta.next_cursor,
+          prev_cursor: paginationMeta.prev_cursor,
+          has_next: paginationMeta.has_next,
+          has_prev: paginationMeta.has_prev,
+          count: paginationMeta.count,
         },
       });
     }
@@ -1586,6 +1608,83 @@ export const searchByMetadataHandler = async (req: Request, res: Response) => {
       "Failed to search by metadata",
       {
         error: "Failed to search by metadata",
+      },
+    );
+  }
+};
+
+// ── Bulk transaction status (#2370) ────────────────────────────────────────
+
+const MAX_BATCH_STATUS_IDS = 50;
+
+const batchStatusSchema = z.object({
+  transaction_ids: z
+    .array(z.string().min(1))
+    .min(1, "transaction_ids must contain at least one ID")
+    .max(
+      MAX_BATCH_STATUS_IDS,
+      `transaction_ids must not contain more than ${MAX_BATCH_STATUS_IDS} items`,
+    ),
+});
+
+export interface BatchTransactionStatusEntry {
+  id: string;
+  status: TransactionStatus;
+  amount: string;
+  convertedAmount: string | null;
+  currency: string | undefined;
+  updatedAt: Date;
+}
+
+/**
+ * POST /api/v1/transactions/batch-status
+ *
+ * Lets integrators query the status of up to 50 transactions in a single
+ * request instead of issuing one request per transaction during periodic
+ * batch reconciliation. IDs that don't match any transaction (wrong ID,
+ * belongs to another user, etc.) are simply omitted from `data` rather than
+ * failing the whole request — callers diff the input array against the
+ * response keys to find the gaps.
+ */
+export const batchStatusHandler = async (req: Request, res: Response) => {
+  try {
+    const parsed = batchStatusSchema.parse(req.body);
+
+    // De-duplicate while preserving the single-query contract — looking up
+    // the same ID twice would be wasted work for no behavioral difference.
+    const uniqueIds = [...new Set(parsed.transaction_ids)];
+
+    const transactions = await transactionModel.findByIds(uniqueIds);
+
+    const data: Record<string, BatchTransactionStatusEntry> = {};
+    for (const tx of transactions) {
+      data[tx.id] = {
+        id: tx.id,
+        status: tx.status,
+        amount: tx.amount,
+        convertedAmount: tx.convertedAmount ?? null,
+        currency: tx.currency,
+        updatedAt: tx.updatedAt,
+      };
+    }
+
+    return res.json({
+      data,
+      requested: uniqueIds.length,
+      found: transactions.length,
+    });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      const message = err.issues[0]?.message ?? "Invalid batch-status request";
+      throw createError(ERROR_CODES.INVALID_INPUT, message, { error: message });
+    }
+    if (err && (err as any).code) throw err;
+    logger.error("Batch transaction status error:", err);
+    throw createError(
+      ERROR_CODES.INTERNAL_ERROR,
+      "Failed to fetch batch transaction status",
+      {
+        error: "Failed to fetch batch transaction status",
       },
     );
   }

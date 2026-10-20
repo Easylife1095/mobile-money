@@ -92,6 +92,7 @@ export {
 
 export { queueOptions } from "./config";
 export { deadLetterQueue, DLQ_NAME, capturePersistentFailure } from "./dlq";
+export { startDlqMonitor, stopDlqMonitor, replayDlqJob } from "./dlqWorker";
 export { startProviderBalanceAlertWorker, scheduleProviderBalanceAlertJob };
 
 // Accounting Retry Queue Exports
@@ -162,3 +163,16 @@ export {
   childLoggerWithTrace,
   TRACE_ID_KEY,
 } from "./trace";
+
+// Customer KYC Callback Queue Exports
+export {
+  CUSTOMER_CALLBACK_QUEUE_NAME,
+  customerCallbackQueue,
+  enqueueCustomerCallback,
+  deliverCustomerCallback,
+  customerCallbackWorker,
+  startCustomerCallbackWorker,
+  closeCustomerCallbackWorker,
+  closeCustomerCallbackQueue,
+} from "./customerCallbackQueue";
+export type { CustomerCallbackJobData } from "./customerCallbackQueue";

@@ -28,6 +28,11 @@ import {
   sanitizeKycPayload,
   sanitizeKycString,
 } from "../validators/kycSanitizer";
+import {
+  CustomerService,
+  defaultCustomerService,
+  customerEvents,
+} from "../services/customerService";
 
 /**
  * SEP-12: KYC API
@@ -167,11 +172,13 @@ export class Sep12Service {
   private kycService: KYCService;
   private db: Pool;
   private userModel: UserModel;
+  public customerService: CustomerService;
 
-  constructor(db: Pool) {
+  constructor(db: Pool, customerService?: CustomerService) {
     this.db = db;
     this.kycService = new KYCService(db);
     this.userModel = new UserModel();
+    this.customerService = customerService || defaultCustomerService;
   }
 
   /**
@@ -785,4 +792,5 @@ export const createSep12Router = (db: Pool): Router => {
   return router;
 };
 
+export { CustomerService, defaultCustomerService, customerEvents };
 export default createSep12Router;

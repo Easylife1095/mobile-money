@@ -35,7 +35,7 @@ export class StellarBridgeClient {
     this.baseUrl = sanitizedUrl;
     this.jwtToken = config.jwtToken;
     this.timeoutMs = config.timeoutMs || 15000;
-    this.transport = new FetchTransport();
+    this.transport = new FetchTransport(config.retry);
     this.defaultHeaders = config.headers || {};
   }
 

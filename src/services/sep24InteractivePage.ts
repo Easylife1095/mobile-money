@@ -272,3 +272,72 @@ export function renderSep24InteractivePage(
   if (!injection) return SEP24_INTERACTIVE_HTML;
   return SEP24_INTERACTIVE_HTML.replace("</body>", `${injection}\n</body>`);
 }
+
+// ============================================================================
+// Expired interactive session notice (#2264)
+// ============================================================================
+
+export interface Sep24ExpiredSessionPageOptions {
+  /** The expired transaction_id, shown for support/debugging purposes. */
+  transactionId: string;
+  /**
+   * URL the renewal button submits to (a POST endpoint that mints a fresh
+   * interactive session for the same deposit/withdrawal and redirects the
+   * user to it).
+   */
+  renewUrl: string;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Renders the page shown when a wallet (or user) opens an interactive
+ * deposit/withdrawal URL whose session has expired per the configurable
+ * `sep24.interactiveSessionExpiryMinutes` duration. Offers a renewal button
+ * that posts to `renewUrl` to mint a fresh session rather than leaving the
+ * user stuck on a dead link.
+ */
+export function renderSep24ExpiredSessionPage(
+  options: Sep24ExpiredSessionPageOptions,
+): string {
+  const transactionId = escapeHtml(options.transactionId);
+  const renewUrl = escapeHtml(options.renewUrl);
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Session Expired — Mobile Money</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #111827; background: #f9fafb; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+        .card { background: #fff; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); padding: 2.5rem; max-width: 420px; text-align: center; }
+        .icon { font-size: 2.5rem; margin-bottom: 1rem; }
+        h1 { font-size: 1.35rem; font-weight: 700; margin-bottom: 0.5rem; }
+        p { color: #6b7280; font-size: 0.95rem; margin-bottom: 1.5rem; }
+        .tx-id { font-family: monospace; font-size: 0.8rem; color: #9ca3af; margin-bottom: 1.5rem; word-break: break-all; }
+        button { background: #2563eb; color: #fff; border: none; border-radius: 8px; padding: 0.75rem 1.5rem; font-size: 0.95rem; font-weight: 600; cursor: pointer; width: 100%; }
+        button:hover { background: #1d4ed8; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">&#9201;</div>
+        <h1>This session has expired</h1>
+        <p>The interactive deposit/withdrawal link you followed is no longer valid. Start a new session to continue.</p>
+        <div class="tx-id">Transaction: ${transactionId}</div>
+        <form method="POST" action="${renewUrl}">
+            <button type="submit">Renew session</button>
+        </form>
+    </div>
+</body>
+</html>`;
+}

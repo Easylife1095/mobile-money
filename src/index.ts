@@ -31,6 +31,7 @@ import {
   transactionRoutesV1,
   vaultRoutesV1,
 } from "./routes/v1";
+import { quotesRouter } from "./routes/quotes";
 import { transactionRoutes } from "./routes/transactions";
 import { initializeEscrowEventProcessing } from "./services/stellar/stellarService";
 import { authRoutes } from "./routes/auth";
@@ -76,10 +77,15 @@ import {
   dbConnectionLeakDetector,
   PoolStarvationMonitor,
 } from "./middleware/dbConnectionLeakDetector";
+import {
   publicApiRateLimiter,
   sepRateLimiter,
 } from "./middleware/rateLimitRedis";
-import { dbConnectionLeakDetector } from "./middleware/dbConnectionLeakDetector";
+import {
+  merchantRateLimiter,
+  publicRateLimiter,
+} from "./middleware/rateLimiter";
+import merchantWebhookRouter from "./routes/merchantWebhooks";
 import { i18nMiddleware } from "./utils/i18n";
 import { metricsMiddleware } from "./middleware/metrics";
 import { tracingMetricsMiddleware } from "./middleware/tracingMetrics";
@@ -91,6 +97,7 @@ import { developerDashboardRoutes } from "./routes/developerDashboard";
 import { travelRuleRoutes } from "./routes/travelRule";
 import mtnCallbacksRouter from "./routes/mtnCallbacks";
 import mpesaCallbacksRouter from "./routes/mpesaCallbacks";
+import waveWebhookRouter from "./providers/wave/waveWebhook";
 import { createMpesaC2BRouter } from "./providers/mpesa/c2b";
 import orangeMadagascarCallbacksRouter from "./routes/orangeMadagascarCallbacks";
 import orangeGuineaCallbacksRouter from "./routes/orangeGuineaCallbacks";
@@ -128,6 +135,14 @@ import {
 } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
 import { StellarService } from "./services/stellar/stellarService";
+import {
+  startStellarCollector,
+  stopStellarCollector,
+} from "./monitoring/stellarCollector";
+import {
+  startSyntheticProbeWorker,
+  stopSyntheticProbeWorker,
+} from "./workers/syntheticProbeWorker";
 
 // Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
@@ -169,6 +184,10 @@ const SHUTDOWN_TIMEOUT_MS = parseInt(
   process.env.SHUTDOWN_TIMEOUT_MS || "10000",
   10,
 );
+const QUEUE_SHUTDOWN_TIMEOUT_MS = parseInt(
+  process.env.QUEUE_SHUTDOWN_TIMEOUT_MS || "30000",
+  10,
+);
 
 let server: Server | null = null;
 
@@ -176,6 +195,7 @@ export const shutdownHandler = createGracefulShutdownHandler({
   pool,
   disconnectRedis,
   timeoutMs: SHUTDOWN_TIMEOUT_MS,
+  onCleanupTimeoutMs: QUEUE_SHUTDOWN_TIMEOUT_MS,
   onCleanup: async () => {
     console.log("[Shutdown] Draining queue resources");
     const { shutdownQueue } = await import("./queue/index.js");
@@ -188,6 +208,8 @@ export const shutdownHandler = createGracefulShutdownHandler({
 
     const { currencyService } = await import("./services/currency.js");
     currencyService.shutdown();
+    stopStellarCollector();
+    stopSyntheticProbeWorker();
   },
 });
 
@@ -430,6 +452,7 @@ app.use("/api/v1/disputes", disputeRoutesV1);
 app.use("/api/v1/stats", statsRoutesV1);
 app.use("/api/v1/vaults", vaultRoutesV1);
 app.use("/api/v1/compliance/travel-rule", travelRuleRoutes);
+app.use("/api/v1/quotes", quotesRouter);
 
 app.use(
   "/api/transactions",
@@ -456,6 +479,7 @@ app.use("/api/stats", statsRoutes);
 app.use("/api/contacts", contactsRoutes);
 app.use("/api/mtn", mtnCallbacksRouter);
 app.use("/api/mpesa", mpesaCallbacksRouter);
+app.use("/api/webhooks/wave", waveWebhookRouter);
 app.use("/api/mpesa/c2b", createMpesaC2BRouter());
 app.use("/api/orange-madagascar", orangeMadagascarCallbacksRouter);
 app.use("/api/orange-guinea", orangeGuineaCallbacksRouter);
@@ -492,7 +516,7 @@ app.get("/", interactiveSecurityMiddleware, (_req: Request, res: Response) => {
 });
 app.use("/", paymentLinkRoutes);
 
-// GDPR
+app.use("/api/merchant/webhooks", merchantRateLimiter, merchantWebhookRouter);
 app.use("/api/gdpr", privacyRoutes);
 app.use("/api/developer", developerDashboardRoutes);
 app.use("/api/admin", requireAuth, adminRoutes);
@@ -577,6 +601,8 @@ async function initializeRuntime(): Promise<void> {
 
   // Initialize Prometheus Horizon Scraper
   startStellarExporter();
+  startStellarCollector();
+  startSyntheticProbeWorker();
 
   // Verify Horizon reachability before starting runtime workers
   try {
