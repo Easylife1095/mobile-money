@@ -6,7 +6,8 @@ import {
 
 export type { CountryCode };
 
-export type MobileProvider = "mtn" | "airtel" | "orange" | "vodacom" | "tigo";
+export type MobileProvider =
+  "mtn" | "airtel" | "orange" | "vodacom" | "tigo" | "moov";
 export type PhoneOutputFormat =
   "e164" | "national" | "international" | "rfc3966";
 
@@ -31,7 +32,19 @@ export interface ParsedPhoneInfo {
  * These are common prefixes for regions like Uganda/Rwanda/Cameroon/Ghana/Tanzania/Ivory Coast/Senegal.
  */
 export const PROVIDER_PREFIXES: Record<MobileProvider, string[]> = {
-  mtn: ["23767", "23768", "25677", "25678", "23324", "23354", "23355", "23359"],
+  mtn: [
+    "23767",
+    "23768",
+    "25677",
+    "25678",
+    "23324",
+    "23354",
+    "23355",
+    "23359",
+    // Côte d'Ivoire MTN (#2276): national prefixes 05/5, E.164 +225 0501...
+    "22505",
+    // Senegal MTN is not an operating carrier here; no +221 MTN prefix exists.
+  ],
   airtel: [
     "23766",
     "25670",
@@ -45,7 +58,15 @@ export const PROVIDER_PREFIXES: Record<MobileProvider, string[]> = {
     "25410",
     "25411",
   ],
-  orange: ["23765", "23769", "22507", "22177"],
+  orange: [
+    "23765",
+    "23769",
+    // Côte d'Ivoire Orange (#2276): national prefixes 07/7, E.164 +225 0707...
+    "22507",
+    // Senegal Orange (#2276): national prefixes 77 and 78, E.164 +221 77.../78...
+    "22177",
+    "22178",
+  ],
   vodacom: [
     "255740",
     "255762",
@@ -70,6 +91,9 @@ export const PROVIDER_PREFIXES: Record<MobileProvider, string[]> = {
     "255754",
     "255755",
   ],
+  // Moov Money (#2276): currently only verified for Côte d'Ivoire, national
+  // prefixes 01/1, E.164 +225 0101...
+  moov: ["22501"],
 };
 
 export const PROVIDER_PHONE_FORMATS: Record<
@@ -94,6 +118,10 @@ export const PROVIDER_PHONE_FORMATS: Record<
   },
   tigo: {
     defaultRegion: "TZ",
+    output: "e164",
+  },
+  moov: {
+    defaultRegion: "CI",
     output: "e164",
   },
 };
