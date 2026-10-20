@@ -23,6 +23,7 @@ import { randomUUID } from "crypto";
 import { BaseProvider, ProviderAuthConfig } from "./baseProvider";
 import { recordTelecomLatency } from "../../utils/logger";
 import logger from "../../utils/logger";
+import { executeWithCircuitBreaker } from "../../utils/circuitBreaker";
 
 const POLL_DELAY_MS = 15_000;
 const MAX_POLL_ATTEMPTS = 4;
@@ -234,61 +235,82 @@ export class MtnMomoProvider extends BaseProvider {
     const startTime = Date.now();
     const endpoint = "/collection/v1_0/requesttopay";
     const externalId = randomUUID();
-    try {
-      const response = await axios.post(
-        `${this.baseUrl}${endpoint}`,
-        {
-          amount,
-          currency: "EUR",
-          externalId,
-          payer: { partyIdType: "MSISDN", partyId: phoneNumber },
-          payerMessage: "Payment for Stellar deposit",
-          payeeNote: "Deposit",
-        },
-        {
-          headers: {
-            "Ocp-Apim-Subscription-Key": this.subscriptionKey,
-            "X-Target-Environment": "sandbox",
-          },
-          timeout: this.timeoutMs,
-        },
-      );
 
-      const durationMs = Date.now() - startTime;
-      recordTelecomLatency({
-        provider: this.providerName,
-        operation: "requestPayment",
-        durationMs,
-        success: true,
-        statusCode: response.status,
-        endpoint,
-      });
+    return executeWithCircuitBreaker({
+      provider: this.providerName,
+      operation: "requestPayment",
+      execute: async () => {
+        try {
+          const response = await axios.post(
+            `${this.baseUrl}${endpoint}`,
+            {
+              amount,
+              currency: "EUR",
+              externalId,
+              payer: { partyIdType: "MSISDN", partyId: phoneNumber },
+              payerMessage: "Payment for Stellar deposit",
+              payeeNote: "Deposit",
+            },
+            {
+              headers: {
+                "Ocp-Apim-Subscription-Key": this.subscriptionKey,
+                "X-Target-Environment": "sandbox",
+              },
+              timeout: this.timeoutMs,
+            },
+          );
 
-      return { success: true, data: response.data };
-    } catch (error: unknown) {
-      const durationMs = Date.now() - startTime;
-      const isTimeout = isTimeoutError(error);
-      const axiosError = error as AxiosError;
-      recordTelecomLatency({
-        provider: this.providerName,
-        operation: "requestPayment",
-        durationMs,
-        success: isTimeout ? true : false,
-        statusCode: isTimeout ? undefined : axiosError?.response?.status,
-        endpoint,
-      });
+          const durationMs = Date.now() - startTime;
+          recordTelecomLatency({
+            provider: this.providerName,
+            operation: "requestPayment",
+            durationMs,
+            success: true,
+            statusCode: response.status,
+            endpoint,
+          });
 
-      if (isTimeout) {
+          return { success: true, data: response.data };
+        } catch (error: unknown) {
+          const durationMs = Date.now() - startTime;
+          const isTimeout = isTimeoutError(error);
+          const axiosError = error as AxiosError;
+          recordTelecomLatency({
+            provider: this.providerName,
+            operation: "requestPayment",
+            durationMs,
+            success: false,
+            statusCode: isTimeout ? undefined : axiosError?.response?.status,
+            endpoint,
+          });
+
+          if (isTimeout) {
+            logger.warn(
+              { externalId, phoneNumber, amount, durationMs },
+              "MTN requestPayment timed out, scheduling status poll",
+            );
+            enqueuePoll(externalId, this);
+            // Throw so the circuit breaker counts this as a failure
+            throw error;
+          }
+
+          return { success: false, error };
+        }
+      },
+      fallback: async (_error) => {
+        // OPEN state: fail fast without calling the API
         logger.warn(
-          { externalId, phoneNumber, amount, durationMs },
-          "MTN requestPayment timed out, scheduling status poll",
+          { phoneNumber, amount },
+          "MTN circuit breaker OPEN — returning cached fallback for requestPayment",
         );
-        enqueuePoll(externalId, this);
-        return { success: true, data: { externalId, status: "pending" } };
-      }
-
-      return { success: false, error };
-    }
+        return {
+          success: false,
+          error: new Error(
+            "MTN MoMo collection is temporarily unavailable (circuit breaker open). Please retry shortly.",
+          ),
+        };
+      },
+    });
   }
 
   /** Disburse funds to a phone number. */
