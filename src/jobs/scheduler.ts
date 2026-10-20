@@ -36,6 +36,7 @@ import { runHighValueComplianceReportJob } from "./highValueComplianceReportJob"
 import { runStellarReconciliationJob } from "../workers/stellarReconciliation";
 import { runAirtelReconciliationWorker } from "../workers/airtelReconciliation";
 import { runQuoteExpirationJob } from "./quoteExpirationJob";
+import { runSep24InteractiveExpirationJob } from "./sep24InteractiveExpirationJob";
 import { runDailySarSummaryJob } from "./dailySarSummaryJob";
 import { runPartitionManagerJob } from "./partitionManager";
 import { withJobTrace } from "../queue/jobTracing";
@@ -126,7 +127,8 @@ const JOBS: JobConfig[] = [
     // Every 15 minutes - checks Airtel operational balance and alerts
     schedule: process.env.AIRTEL_BALANCE_MONITOR_CRON || "*/15 * * * *",
     handler: async () => {
-      const { checkAirtelBalanceAndAlert } = await import("./balanceMonitorJob.js");
+      const { checkAirtelBalanceAndAlert } =
+        await import("./balanceMonitorJob.js");
       return checkAirtelBalanceAndAlert();
     },
   },
@@ -273,6 +275,13 @@ const JOBS: JobConfig[] = [
     // Every minute - sweeps expired firm quotes and releases reserved liquidity
     schedule: process.env.SEP38_QUOTE_EXPIRATION_CRON || "* * * * *",
     handler: runQuoteExpirationJob,
+  },
+  {
+    name: "sep24-interactive-expiration",
+    // Every minute - sweeps interactive deposit/withdrawal sessions past the
+    // configurable expiry duration and transitions them to expired (#2264)
+    schedule: process.env.SEP24_INTERACTIVE_EXPIRATION_CRON || "* * * * *",
+    handler: runSep24InteractiveExpirationJob,
   },
 ];
 
