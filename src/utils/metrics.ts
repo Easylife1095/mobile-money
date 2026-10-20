@@ -372,4 +372,38 @@ export const remittanceDropOffTotal = new Counter({
   registers: [register],
 });
 
+// ─── Provider latency & error-rate percentiles (Issue #2357) ─────────────────
+
+/**
+ * Fine-grained histogram of outbound provider HTTP request durations.
+ *
+ * Labels:
+ *   provider  – mtn_momo, airtel, orange, etc.
+ *   operation – requestPayment, sendPayout, getTransactionStatus, etc.
+ *
+ * Usage:
+ *   momoProviderRequestDurationSeconds.observe({ provider, operation }, durationSeconds);
+ */
+export const momoProviderRequestDurationSeconds = new Histogram({
+  name: "momo_provider_request_duration_seconds",
+  help: "HTTP request duration in seconds for each mobile money provider operation",
+  labelNames: ["provider", "operation"],
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30],
+  registers: [register],
+});
+
+/**
+ * Counter of provider errors broken down by error type.
+ *
+ * Labels:
+ *   provider   – mtn_momo, airtel, orange, etc.
+ *   error_type – timeout, http_4xx, http_5xx, network, unknown
+ */
+export const momoProviderErrorsTotal = new Counter({
+  name: "momo_provider_errors_total",
+  help: "Total number of errors returned by mobile money provider operations",
+  labelNames: ["provider", "error_type"],
+  registers: [register],
+});
+
 

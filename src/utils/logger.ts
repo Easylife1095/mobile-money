@@ -8,6 +8,10 @@ import Transport from "winston-transport";
 import DailyRotateFile from "winston-daily-rotate-file";
 import { REDACT_KEYS } from "./redact";
 import { AsyncLocalStorage } from "async_hooks";
+import {
+  momoProviderRequestDurationSeconds,
+  momoProviderErrorsTotal,
+} from "./metrics";
 
 export const requestContext = new AsyncLocalStorage<{
   trace_id: string;
@@ -767,6 +771,29 @@ export function recordTelecomLatency(metric: TelecomLatencyMetric): void {
     timestamp,
     durationMs: Math.max(0, Math.round(metric.durationMs * 100) / 100),
   };
+
+  // ── Prometheus metrics ──────────────────────────────────────────────────
+  const durationSeconds = entry.durationMs / 1_000;
+  momoProviderRequestDurationSeconds.observe(
+    { provider: entry.provider, operation: entry.operation },
+    durationSeconds,
+  );
+
+  if (!entry.success) {
+    let errorType = "unknown";
+    const code = entry.statusCode;
+    if (code) {
+      if (code === 408 || code === 504) errorType = "timeout";
+      else if (code >= 400 && code < 500) errorType = "http_4xx";
+      else if (code >= 500) errorType = "http_5xx";
+    } else if (entry.durationMs >= (metric as any).timeoutMs) {
+      errorType = "timeout";
+    } else {
+      errorType = "network";
+    }
+    momoProviderErrorsTotal.inc({ provider: entry.provider, error_type: errorType });
+  }
+  // ────────────────────────────────────────────────────────────────────────
 
   telecomLatencyStore.push(entry);
   if (telecomLatencyStore.length > MAX_STORE_ENTRIES) {
