@@ -681,13 +681,21 @@ export async function getPoolClient() {
 
 /**
  * Read replica connection pool – handles SELECT queries to take load off the
- * primary. If READ_REPLICA_URL is not configured, falls back to the primary.
+ * primary (e.g. GET /api/v1/reports/* and dashboard analytics, #2378). Falls
+ * back to the primary when no replica is configured or reachable.
  *
- * Multiple replica URLs can be provided as a comma-separated list in
- * READ_REPLICA_URL. The pool load-balances across all replicas via round-robin.
+ * Multiple replica URLs can be provided as a comma-separated list in either
+ * DATABASE_READ_URL (preferred name, #2378) or the legacy READ_REPLICA_URL.
+ * DATABASE_READ_URL takes precedence when both are set. The pool
+ * load-balances across all replicas via round-robin.
  */
-const replicaUrls: string[] = process.env.READ_REPLICA_URL
-  ? process.env.READ_REPLICA_URL.split(",").map((url) => url.trim())
+const replicaUrls: string[] = (
+  process.env.DATABASE_READ_URL || process.env.READ_REPLICA_URL
+)
+  ? (process.env.DATABASE_READ_URL || process.env.READ_REPLICA_URL || "")
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean)
   : [];
 
 const REPLICA_SYNC_LAG_THRESHOLD_SECONDS = (() => {
@@ -1022,20 +1030,37 @@ export async function getPgBouncerStats(): Promise<{
         "postgresql://user:password@localhost:6432/pgbouncer",
     });
 
-    const result = await pgbouncerPool.query(
-      "SELECT sum(cl_active) as active, sum(cl_idle) as idle, sum(sv_active) as sv_active, sum(sv_idle) as sv_idle FROM pgbouncer.client_lookup;",
-    );
+    // PgBouncer's admin console only understands its own SHOW commands, not
+    // arbitrary SQL (there is no queryable `pgbouncer.client_lookup` table —
+    // querying it fails with "invalid command ... use SHOW HELP"). SHOW
+    // CLIENTS lists every client-facing connection (state: active/idle);
+    // SHOW SERVERS lists every connection PgBouncer holds to the real
+    // Postgres server on the other side of the pool.
+    const [clients, servers] = await Promise.all([
+      pgbouncerPool.query("SHOW CLIENTS;"),
+      pgbouncerPool.query("SHOW SERVERS;"),
+    ]);
 
     await pgbouncerPool.end();
 
-    const row = result.rows[0] || {};
+    const clientActive = clients.rows.filter(
+      (r: { state?: string }) => r.state === "active",
+    ).length;
+    const clientIdle = clients.rows.filter(
+      (r: { state?: string }) => r.state === "idle",
+    ).length;
+    const serverActive = servers.rows.filter(
+      (r: { state?: string }) => r.state === "active",
+    ).length;
+    const serverIdle = servers.rows.filter(
+      (r: { state?: string }) => r.state === "idle",
+    ).length;
+
     return {
-      activeConnections: parseInt(row.sv_active || 0),
-      idleConnections: parseInt(row.sv_idle || 0),
-      totalConnections:
-        parseInt(row.sv_active || 0) + parseInt(row.sv_idle || 0),
-      clientConnections:
-        parseInt(row.cl_active || 0) + parseInt(row.cl_idle || 0),
+      activeConnections: serverActive,
+      idleConnections: serverIdle,
+      totalConnections: serverActive + serverIdle,
+      clientConnections: clientActive + clientIdle,
     };
   } catch (err) {
     console.warn("Failed to get PgBouncer stats:", err);

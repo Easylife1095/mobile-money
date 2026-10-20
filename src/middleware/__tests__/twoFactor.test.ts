@@ -114,7 +114,10 @@ describe("twoFactor middleware headers", () => {
 
     await middleware(undefined, req, res, next);
 
-    expect(mockedLimiter.incrementFailures).toHaveBeenCalledWith("user-123");
+    expect(mockedLimiter.incrementFailures).toHaveBeenCalledWith(
+      "user-123",
+      undefined,
+    );
     expect(res.setHeader).toHaveBeenCalledWith("Retry-After", "900");
     expect(res.status).toHaveBeenCalledWith(403);
     expect(res.json).toHaveBeenCalledWith(
@@ -124,6 +127,20 @@ describe("twoFactor middleware headers", () => {
       }),
     );
     expect(next).not.toHaveBeenCalled();
+  });
+
+  it("passes the user's email through to incrementFailures so a lockout notification can be sent (#2380)", async () => {
+    const { req, res, next } = makeReqRes();
+    req.headers["x-2fa-token"] = "123456";
+    (res.locals.user as any).email = "user-123@example.com";
+    const middleware = requireTwoFactor(req, res, next);
+
+    await middleware(undefined, req, res, next);
+
+    expect(mockedLimiter.incrementFailures).toHaveBeenCalledWith(
+      "user-123",
+      "user-123@example.com",
+    );
   });
 
   it("attaches retry headers when 2FA is required but not provided", async () => {
