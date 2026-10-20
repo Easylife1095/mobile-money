@@ -157,6 +157,7 @@ export interface ReconcileResult {
   newStatus: string | null;
   updated: boolean;
   providerStatus: string;
+  amount?: string;
 }
 
 export interface ReconcileResponse {
@@ -167,11 +168,13 @@ export interface ReconcileResponse {
 
 export async function triggerReconcile(
   dryRun = false,
+  provider?: string,
+  date?: string,
 ): Promise<ReconcileResponse> {
   try {
     const { data } = await buildClient().post<ReconcileResponse>(
       "/api/admin/transactions/reconcile",
-      { dryRun },
+      { dryRun, provider, date },
     );
     return data;
   } catch (err) {
