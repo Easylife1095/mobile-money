@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from "express";
+import { recordAdminAction } from "../services/auditLogger";
 
 const router = Router();
 
@@ -35,10 +36,7 @@ const normalizeBulkIds = (value: unknown): string[] => {
 interface PendingAction {
   id: string;
   action_type:
-    | "freeze_account"
-    | "manual_credit"
-    | "manual_debit"
-    | "unlock_user";
+    "freeze_account" | "manual_credit" | "manual_debit" | "unlock_user";
   status: "pending" | "approved" | "rejected";
   payload: Record<string, unknown>;
   maker_id: string;
@@ -69,6 +67,12 @@ const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
   next();
 };
 
+/**
+ * Legacy console-based audit trail. Kept alongside `recordAdminAction` (the
+ * tamper-evident, hash-chained, partitioned-table audit event - #2358) as a
+ * cheap secondary breadcrumb in process logs; it is not the system of
+ * record and must never be relied on in place of `recordAdminAction`.
+ */
 const logAudit = (
   event: string,
   actorId: string,
@@ -82,6 +86,11 @@ const logAudit = (
   });
 };
 
+const extractRequestMeta = (req: Request) => ({
+  ipAddress: req.ip ?? null,
+  userAgent: req.get("user-agent") ?? null,
+});
+
 const generateId = () =>
   Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -89,7 +98,7 @@ const generateId = () =>
  * POST /api/admin/actions
  * Maker submits a high-risk action for approval
  */
-router.post("/actions", requireAdmin, (req: Request, res: Response) => {
+router.post("/actions", requireAdmin, async (req: Request, res: Response) => {
   const maker = (req as AuthRequest).user!;
   const { action_type, payload, maker_note } = req.body;
 
@@ -123,6 +132,18 @@ router.post("/actions", requireAdmin, (req: Request, res: Response) => {
     payload,
   });
 
+  // A new pending action has no prior state - it's a creation, not a
+  // mutation, so `before` is intentionally omitted (see buildDiff's
+  // `hadPriorState` flag for how that's represented in the stored diff).
+  await recordAdminAction({
+    actorId: maker.id,
+    action: "MAKER_CHECKER_ACTION_SUBMITTED",
+    resource: "maker_checker_action",
+    resourceId: action.id,
+    after: action as unknown as Record<string, unknown>,
+    ...extractRequestMeta(req),
+  });
+
   return res.status(201).json({
     message: "Action submitted and awaiting checker approval",
     action,
@@ -135,7 +156,7 @@ router.post("/actions", requireAdmin, (req: Request, res: Response) => {
 router.post(
   "/actions/bulk/approve",
   requireAdmin,
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const checker = (req as AuthRequest).user!;
     const { checker_note } = req.body;
 
@@ -153,6 +174,7 @@ router.post(
     }
 
     const results: BulkMakerCheckerResult[] = [];
+    const requestMeta = extractRequestMeta(req);
 
     for (const actionId of actionIds) {
       try {
@@ -185,6 +207,8 @@ router.post(
           continue;
         }
 
+        const before = { ...action };
+
         action.status = "approved";
         action.checker_id = checker.id;
         action.checker_note = checker_note || undefined;
@@ -196,6 +220,20 @@ router.post(
           makerId: action.maker_id,
           action_type: action.action_type,
           result,
+        });
+
+        // Audit events are recorded per action (not batched) so each
+        // approval remains individually attributable in the audit trail,
+        // matching the hash-chained, one-entry-per-action model the rest
+        // of the admin surface uses.
+        await recordAdminAction({
+          actorId: checker.id,
+          action: "MAKER_CHECKER_ACTION_APPROVED",
+          resource: "maker_checker_action",
+          resourceId: action.id,
+          before: before as unknown as Record<string, unknown>,
+          after: { ...action, result } as unknown as Record<string, unknown>,
+          ...requestMeta,
         });
 
         results.push({ actionId, status: "success" });
@@ -225,7 +263,7 @@ router.post(
 router.post(
   "/actions/bulk/reject",
   requireAdmin,
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const checker = (req as AuthRequest).user!;
     const { checker_note } = req.body;
 
@@ -243,6 +281,7 @@ router.post(
     }
 
     const results: BulkMakerCheckerResult[] = [];
+    const requestMeta = extractRequestMeta(req);
 
     for (const actionId of actionIds) {
       try {
@@ -275,6 +314,8 @@ router.post(
           continue;
         }
 
+        const before = { ...action };
+
         action.status = "rejected";
         action.checker_id = checker.id;
         action.checker_note = checker_note || undefined;
@@ -284,6 +325,16 @@ router.post(
           actionId: action.id,
           makerId: action.maker_id,
           action_type: action.action_type,
+        });
+
+        await recordAdminAction({
+          actorId: checker.id,
+          action: "MAKER_CHECKER_ACTION_REJECTED",
+          resource: "maker_checker_action",
+          resourceId: action.id,
+          before: before as unknown as Record<string, unknown>,
+          after: action as unknown as Record<string, unknown>,
+          ...requestMeta,
         });
 
         results.push({ actionId, status: "success" });
@@ -339,7 +390,7 @@ router.get("/actions/:id", requireAdmin, (req: Request, res: Response) => {
 router.post(
   "/actions/:id/approve",
   requireAdmin,
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const checker = (req as AuthRequest).user!;
     const { checker_note } = req.body;
 
@@ -362,6 +413,8 @@ router.post(
       });
     }
 
+    const before = { ...action };
+
     action.status = "approved";
     action.checker_id = checker.id;
     action.checker_note = checker_note || undefined;
@@ -375,6 +428,16 @@ router.post(
       makerId: action.maker_id,
       action_type: action.action_type,
       result,
+    });
+
+    await recordAdminAction({
+      actorId: checker.id,
+      action: "MAKER_CHECKER_ACTION_APPROVED",
+      resource: "maker_checker_action",
+      resourceId: action.id,
+      before: before as unknown as Record<string, unknown>,
+      after: { ...action, result } as unknown as Record<string, unknown>,
+      ...extractRequestMeta(req),
     });
 
     return res.json({
@@ -392,7 +455,7 @@ router.post(
 router.post(
   "/actions/:id/reject",
   requireAdmin,
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const checker = (req as AuthRequest).user!;
     const { checker_note } = req.body;
 
@@ -414,6 +477,8 @@ router.post(
       });
     }
 
+    const before = { ...action };
+
     action.status = "rejected";
     action.checker_id = checker.id;
     action.checker_note = checker_note || undefined;
@@ -423,6 +488,16 @@ router.post(
       actionId: action.id,
       makerId: action.maker_id,
       action_type: action.action_type,
+    });
+
+    await recordAdminAction({
+      actorId: checker.id,
+      action: "MAKER_CHECKER_ACTION_REJECTED",
+      resource: "maker_checker_action",
+      resourceId: action.id,
+      before: before as unknown as Record<string, unknown>,
+      after: action as unknown as Record<string, unknown>,
+      ...extractRequestMeta(req),
     });
 
     return res.json({
