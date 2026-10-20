@@ -142,9 +142,6 @@ export const errorHandler = (
   responseWithLocals.locals = responseWithLocals.locals || {};
   responseWithLocals.locals["__criticalError"] = err;
 
-  const inferredCode = err.code || getCodeFromStatus(err.statusCode || 500);
-  const statusCode =
-    typeof err.statusCode === "number" && err.statusCode >= 400
   const isTimeout = isQueryCanceledError(err) || err.code === "57014" || err.code === "GATEWAY_TIMEOUT" || (err as any)?.originalError?.code === "57014";
   const inferredCode = isTimeout
     ? ERROR_CODES.GATEWAY_TIMEOUT
