@@ -21,8 +21,14 @@
 import axios, { AxiosError } from "axios";
 import { randomUUID } from "crypto";
 import { BaseProvider, ProviderAuthConfig } from "./baseProvider";
+import type {
+  BatchPayoutItem,
+  BatchPayoutResult,
+} from "../mobilemoney/mobileMoneyService";
 import { recordTelecomLatency } from "../../utils/logger";
 import logger from "../../utils/logger";
+
+export type { BatchPayoutItem, BatchPayoutResult };
 
 const POLL_DELAY_MS = 15_000;
 const MAX_POLL_ATTEMPTS = 4;
@@ -110,19 +116,6 @@ export type MtnTransactionStatus =
   | "failed"
   | "pending"
   | "unknown";
-
-export interface BatchPayoutItem {
-  referenceId: string;
-  phoneNumber: string;
-  amount: string;
-}
-
-export interface BatchPayoutResult {
-  referenceId: string;
-  success: boolean;
-  providerReference?: string;
-  error?: string;
-}
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
