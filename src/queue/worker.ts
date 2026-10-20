@@ -38,6 +38,8 @@ import { amlScreeningService } from "../services/amlScreening";
 
 import { queueOptions, getWorkerConcurrency } from "./config";
 import { providerQueueControl } from "./providerQueueControl";
+import { WorkerAutoscaler, isAutoscalerEnabled } from "./workerAutoscaler";
+import { transactionQueue } from "./transactionQueue";
 import {
   createProviderWorker,
   isProviderRateLimitedQueuesEnabled,
@@ -808,6 +810,17 @@ export const transactionWorker:
       { ...queueOptions, concurrency: CONCURRENCY },
     );
 
+// Scale worker concurrency with queue depth (BullMQ worker only; the NATS
+// consumer manages its own concurrency).
+let workerAutoscaler: WorkerAutoscaler | null = null;
+if (
+  transactionWorker instanceof Worker &&
+  isAutoscalerEnabled() &&
+  process.env.NODE_ENV !== "test"
+) {
+  workerAutoscaler = new WorkerAutoscaler(transactionQueue, transactionWorker);
+  workerAutoscaler.start();
+}
 /**
  * Per-provider rate-limited workers (#2277). Each provider gets its own
  * BullMQ Worker consuming its own queue (src/queue/providerRateLimitedQueues.ts),
@@ -827,6 +840,7 @@ const providerWorkers: Array<Worker<TransactionJobData, TransactionJobResult>> =
     : [];
 
 export async function closeWorker(): Promise<void> {
+  workerAutoscaler?.stop();
   await transactionWorker.close();
   await Promise.all(providerWorkers.map((w) => w.close()));
   if (NATS_QUEUE_ENABLED) {

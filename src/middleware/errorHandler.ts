@@ -244,5 +244,11 @@ export const errorHandler = (
     delete body.details;
   }
 
+  const retryAfterSeconds = (err as AppError & { retryAfterSeconds?: unknown })
+    .retryAfterSeconds;
+  if (statusCode === 503 && typeof retryAfterSeconds === "number") {
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+  }
+
   res.status(statusCode).json(body);
 };

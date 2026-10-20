@@ -27,8 +27,10 @@ import {
   startReceivingAnchorWebhookWorker,
 } from "./receivingAnchorWebhookWorker";
 import { closeReceivingAnchorWebhookQueue } from "../services/webhookService";
+import { stopRedisBackpressureMonitor } from "./redisBackpressure";
 
 export async function shutdownQueue(): Promise<void> {
+  stopRedisBackpressureMonitor();
   await Promise.all([
     closeWorker().catch(() => undefined),
     closeSyncWorker().catch(() => undefined),
@@ -54,6 +56,13 @@ export {
   resumeQueue,
   drainQueue,
 } from "./transactionQueue";
+export {
+  startRedisBackpressureMonitor,
+  stopRedisBackpressureMonitor,
+  redisBackpressureGuard,
+  isBackpressureActive,
+  getBackpressureState,
+} from "./redisBackpressure";
 export type {
   TransactionJobData,
   TransactionJobResult,

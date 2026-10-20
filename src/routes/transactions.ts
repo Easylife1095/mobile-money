@@ -1,4 +1,5 @@
 import logger from "../utils/logger";
+import { redisBackpressureGuard } from "../queue/redisBackpressure";
 import { Router, Request, Response } from "express";
 import {
   cancelTransactionHandler,
@@ -243,6 +244,7 @@ transactionRoutes.patch(
 transactionRoutes.post(
   "/deposit",
   authenticateToken,
+  redisBackpressureGuard,
   strictIdempotency,
   TimeoutPresets.long,
   haltOnTimedout,
@@ -255,6 +257,7 @@ transactionRoutes.post(
 transactionRoutes.post(
   "/withdraw",
   authenticateToken,
+  redisBackpressureGuard,
   strictIdempotency,
   TimeoutPresets.long,
   haltOnTimedout,
